@@ -699,3 +699,172 @@ export async function saveSenses(
   
   console.log(`[Save] ✓ Successfully saved ${meaningsData?.length || newMeanings.length} new meanings to meanings_th table (${skippedCount} already existed)`);
 }
+
+/**
+ * Generate a unique bigint ID for a new meaning
+ * Uses timestamp-based approach with random component for uniqueness
+ */
+function generateMeaningId(): bigint {
+  // Use current timestamp in milliseconds, add random 0-999 for uniqueness
+  return BigInt(Date.now() * 1000 + Math.floor(Math.random() * 1000));
+}
+
+/**
+ * Create a new meaning in meanings_th table
+ * 
+ * 📋 Validates against: src/schemas/meaningThSchema.ts
+ * Returns validated MeaningTh object
+ */
+export async function createMeaning(
+  wordTh: string,
+  definitionTh: string,
+  source?: string
+): Promise<MeaningTh> {
+  console.log(`[Create] Creating new meaning for word "${wordTh}"`);
+  
+  if (!definitionTh || definitionTh.trim().length === 0) {
+    throw new Error('definition_th is required and cannot be empty');
+  }
+  
+  const meaningId = generateMeaningId();
+  const now = new Date().toISOString();
+  
+  // Prepare data for validation (without id and created_at for input validation)
+  const meaningData = {
+    definition_th: definitionTh.trim(),
+    word_th_id: wordTh,
+    source: source?.trim() || undefined,
+  };
+  
+  // Validate definition_th is non-empty
+  if (!meaningData.definition_th || meaningData.definition_th.length === 0) {
+    throw new Error('definition_th cannot be empty');
+  }
+  
+  // Prepare data for database insert
+  const dbData = {
+    id: meaningId.toString(),
+    definition_th: meaningData.definition_th,
+    word_th_id: meaningData.word_th_id || null,
+    source: meaningData.source || null,
+    created_at: now,
+  };
+  
+  // Insert into database
+  const { data, error } = await supabase
+    .from('meanings_th')
+    .insert(dbData)
+    .select()
+    .single();
+  
+  if (error) {
+    console.error(`[Create] ✗ Failed to create meaning:`, error);
+    throw new Error(`Failed to create meaning: ${error.message}`);
+  }
+  
+  // Normalize null to undefined for Zod validation
+  const normalizedData = {
+    ...data,
+    word_th_id: data.word_th_id === null ? undefined : data.word_th_id,
+    source: data.source === null ? undefined : data.source,
+    created_at: data.created_at ? new Date(data.created_at).toISOString() : undefined,
+  };
+  
+  // Validate with Zod schema before returning
+  const validated = meaningThSchema.parse(normalizedData);
+  
+  console.log(`[Create] ✓ Successfully created meaning with ID ${meaningId.toString()}`);
+  return validated;
+}
+
+/**
+ * Update an existing meaning in meanings_th table
+ * 
+ * 📋 Validates against: src/schemas/meaningThSchema.ts
+ * Returns updated and validated MeaningTh object
+ */
+export async function updateMeaning(
+  meaningId: bigint,
+  updates: { definition_th?: string; source?: string }
+): Promise<MeaningTh> {
+  console.log(`[Update] Updating meaning with ID ${meaningId.toString()}`);
+  
+  // Validate updates
+  if (updates.definition_th !== undefined) {
+    const trimmed = updates.definition_th.trim();
+    if (trimmed.length === 0) {
+      throw new Error('definition_th cannot be empty');
+    }
+    updates.definition_th = trimmed;
+  }
+  
+  if (updates.source !== undefined) {
+    updates.source = updates.source.trim() || undefined;
+  }
+  
+  // Prepare update data (only include provided fields)
+  const updateData: { definition_th?: string; source?: string | null } = {};
+  if (updates.definition_th !== undefined) {
+    updateData.definition_th = updates.definition_th;
+  }
+  if (updates.source !== undefined) {
+    updateData.source = updates.source || null;
+  }
+  
+  if (Object.keys(updateData).length === 0) {
+    throw new Error('No updates provided');
+  }
+  
+  // Update in database
+  const { data, error } = await supabase
+    .from('meanings_th')
+    .update(updateData)
+    .eq('id', meaningId.toString())
+    .select()
+    .single();
+  
+  if (error) {
+    console.error(`[Update] ✗ Failed to update meaning:`, error);
+    throw new Error(`Failed to update meaning: ${error.message}`);
+  }
+  
+  if (!data) {
+    throw new Error(`Meaning with ID ${meaningId.toString()} not found`);
+  }
+  
+  // Normalize null to undefined for Zod validation
+  const normalizedData = {
+    ...data,
+    word_th_id: data.word_th_id === null ? undefined : data.word_th_id,
+    source: data.source === null ? undefined : data.source,
+    created_at: data.created_at ? new Date(data.created_at).toISOString() : undefined,
+  };
+  
+  // Validate with Zod schema before returning
+  const validated = meaningThSchema.parse(normalizedData);
+  
+  console.log(`[Update] ✓ Successfully updated meaning with ID ${meaningId.toString()}`);
+  return validated;
+}
+
+/**
+ * Delete a meaning from meanings_th table
+ * 
+ * ⚠️ WARNING: This will permanently delete the meaning. If the meaning is referenced
+ * in subtitles_th.tokens_th, those references will become invalid.
+ */
+export async function deleteMeaning(meaningId: bigint): Promise<void> {
+  console.log(`[Delete] Deleting meaning with ID ${meaningId.toString()}`);
+  
+  const { error } = await supabase
+    .from('meanings_th')
+    .delete()
+    .eq('id', meaningId.toString());
+  
+  if (error) {
+    console.error(`[Delete] ✗ Failed to delete meaning:`, error);
+    throw new Error(`Failed to delete meaning: ${error.message}`);
+  }
+  
+  console.log(`[Delete] ✓ Successfully deleted meaning with ID ${meaningId.toString()}`);
+}

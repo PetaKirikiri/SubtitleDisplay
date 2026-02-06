@@ -28,7 +28,7 @@ export const SubArea: React.FC<SubAreaProps> = ({
   
   return (
     <div 
-      className="relative w-full h-full bg-black text-white text-center p-5 overflow-visible pointer-events-auto text-[77px] box-border border-t-[3px] border-t-[#e50914] border-l-0 border-r-0 border-b-0"
+      className="relative w-full h-full bg-black text-white text-center p-5 overflow-visible pointer-events-auto text-[77px] box-border border-t-[3px] border-t-[#e50914] border-l-0 border-r-0 border-b-0 select-text"
     >
       <SubtitleDisplayModeDropdown
         currentMode={displayMode}
@@ -45,14 +45,19 @@ export const SubArea: React.FC<SubAreaProps> = ({
             return (
               <span
                 key={index}
-                className={`cursor-pointer px-1 rounded transition-colors ${
-                  hasSelection
+                className={`select-text cursor-pointer px-1 rounded transition-colors ${
+                  isCurrentToken
+                    ? 'border-4 border-yellow-400 bg-yellow-400/20 shadow-lg shadow-yellow-400/50'
+                    : hasSelection
                     ? 'bg-[#e50914]/20 border border-[#e50914]/50 hover:bg-[#e50914]/30'
-                    : isCurrentToken
-                    ? 'ring-2 ring-[#e50914]/30 bg-[#e50914]/5 hover:bg-[#e50914]/10'
                     : 'hover:bg-white/20'
                 }`}
-                onClick={() => onTokenClick?.(token, index)}
+                onClick={(e) => {
+                  // Only trigger click if no text is selected
+                  if (window.getSelection()?.toString().length === 0) {
+                    onTokenClick?.(token, index);
+                  }
+                }}
                 title={hasSelection ? 'Meaning selected' : isCurrentToken ? 'Currently editing' : 'Click to select meaning'}
               >
                 {tokenText}
@@ -61,7 +66,7 @@ export const SubArea: React.FC<SubAreaProps> = ({
           })}
         </div>
       ) : (
-        displayText
+        <div className="select-text">{displayText}</div>
       )}
     </div>
   );
