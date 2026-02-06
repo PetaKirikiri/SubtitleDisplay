@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Subtitle Display Extension",
+  "version": "1.0.0",
+  "description": "Extract VTT files and metadata from Netflix pages",
+  "permissions": ["storage", "scripting", "tabs"],
+  "host_permissions": ["*://www.netflix.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["*://www.netflix.com/*"],
+      "js": ["content.js"],
+      "type": "module",
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["styles/content.css"],
+      "matches": ["*://www.netflix.com/*"]
+    }
+  ]
+}

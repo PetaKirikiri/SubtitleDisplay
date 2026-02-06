@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+/* Make deadspace white to visualize panel boundaries */
+html,
+body {
+  background-color: #ffffff !important;
+}
