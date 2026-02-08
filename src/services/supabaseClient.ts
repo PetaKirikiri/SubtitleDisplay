@@ -121,6 +121,8 @@ export async function fetchSubtitles(mediaId: string): Promise<SubtitleTh[]> {
   const supabase = getSupabaseClient();
   
   // Filter by id pattern: `${mediaId}_${index}`
+  // NOTE: No .limit() is used - Supabase returns all matching records by default
+  // If pagination is needed, we would need to use .range() or handle multiple pages
   const { data, error } = await supabase
     .from('subtitles_th')
     .select('*')
@@ -135,15 +137,30 @@ export async function fetchSubtitles(mediaId: string): Promise<SubtitleTh[]> {
     return [];
   }
   
-  // Validate each subtitle with zod schema
+  // Filter by ID pattern and sort by index number extracted from ID
+  const filteredAndSorted = data
+    .filter((sub) => {
+      const idStr = sub.id?.toString() || '';
+      // Check if ID matches pattern: `${mediaId}_${index}`
+      return idStr.startsWith(`${mediaId}_`) && idStr.length > mediaId.length + 1;
+    })
+    .sort((a, b) => {
+      // Extract index number from ID (e.g., "81726716_13" -> 13)
+      const aId = a.id?.toString() || '';
+      const bId = b.id?.toString() || '';
+      const aParts = aId.split('_');
+      const bParts = bId.split('_');
+      const aIndex = parseInt(aParts[aParts.length - 1] || '0', 10);
+      const bIndex = parseInt(bParts[bParts.length - 1] || '0', 10);
+      return aIndex - bIndex;
+    });
+  
+  // Validate with minimal schema (just checks required fields exist)
   const validated: SubtitleTh[] = [];
-  for (const sub of data) {
-    try {
-      const parsed = subtitleThSchema.parse(sub);
-      validated.push(parsed);
-    } catch (parseError) {
-      // Skip invalid subtitles but log error
-      console.warn('Skipping invalid subtitle:', sub.id, parseError);
+  for (const sub of filteredAndSorted) {
+    const result = subtitleThSchema.safeParse(sub);
+    if (result.success) {
+      validated.push(result.data);
     }
   }
   

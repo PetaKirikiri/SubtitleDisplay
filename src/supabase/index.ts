@@ -10,6 +10,13 @@
  * - Each query is a fresh HTTP request to Supabase
  * 
  * For data integrity checks, these functions always return the latest data from the database.
+ * 
+ * Architecture: TanStack Query → Supabase Client Functions → Supabase REST API → PostgreSQL
+ *                                    ↑
+ *                            Drizzle Schema (type definitions & relations)
+ * 
+ * Drizzle schemas provide type definitions and relation shapes, but queries are executed
+ * via Supabase client (browser-compatible). TanStack Query wraps these functions for caching.
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -17,6 +24,9 @@ import { subtitleThSchema, type SubtitleTh } from '../schemas/subtitleThSchema';
 import { episodeSchema, type Episode } from '../schemas/episodeSchema';
 import { wordThSchema, type WordTh } from '../schemas/wordThSchema';
 import { meaningThSchema, type MeaningTh } from '../schemas/meaningThSchema';
+
+// Re-export Drizzle schema for migrations and type inference
+export * from '../db/schema';
 
 // Supabase connection
 // ⚠️ Direct database connection - no caching layer
@@ -39,6 +49,8 @@ export async function fetchSubtitles(mediaId: string): Promise<SubtitleTh[]> {
   
   // Subtitles_th table columns: id, thai, start_sec_th, end_sec_th, tokens_th (snake_case)
   // Filter subtitles by id pattern: `${mediaId}_${index}`
+  // NOTE: No .limit() is used - Supabase returns all matching records by default
+  // If pagination is needed, we would need to use .range() or handle multiple pages
   const { data, error } = await supabase
     .from('subtitles_th')
     .select('*')
@@ -49,7 +61,8 @@ export async function fetchSubtitles(mediaId: string): Promise<SubtitleTh[]> {
     error: error?.message, 
     firstSubtitle: data?.[0],
     allIds: data?.slice(0, 20).map((s: any) => s.id),
-    mediaIdLookingFor: mediaId
+    mediaIdLookingFor: mediaId,
+    note: 'No pagination limit applied - fetching all records'
   });
   
   if (error) {
@@ -78,13 +91,29 @@ export async function fetchSubtitles(mediaId: string): Promise<SubtitleTh[]> {
     return aTime - bTime;
   });
   
+  // Extract indices to verify completeness
+  const indices: number[] = [];
+  for (const sub of sorted) {
+    const idStr = sub.id?.toString() || '';
+    const parts = idStr.split('_');
+    const index = parseInt(parts[parts.length - 1], 10);
+    if (!isNaN(index)) {
+      indices.push(index);
+    }
+  }
+  const maxIndex = indices.length > 0 ? Math.max(...indices) : -1;
+  const expectedCount = maxIndex >= 0 ? maxIndex + 1 : 0;
+  
   console.log('[DEBUG] fetchSubtitles filtered result:', {
     originalCount: data?.length || 0, 
-    filteredCount: sorted.length, 
+    filteredCount: sorted.length,
+    expectedCountBasedOnMaxIndex: expectedCount,
+    maxIndex,
     mediaId,
     sampleOriginalIds: data?.slice(0, 5).map((s: any) => s.id),
     filteredIds: sorted.slice(0, 5).map((s: any) => s.id),
-    firstFilteredSubtitle: sorted[0]
+    firstFilteredSubtitle: sorted[0],
+    note: expectedCount > 0 && sorted.length !== expectedCount ? 'WARNING: Count mismatch - may indicate missing subtitles' : 'Count matches expected'
   });
   
   // If no matches, log for debugging but return empty (don't return all - that's wrong data)
@@ -95,7 +124,21 @@ export async function fetchSubtitles(mediaId: string): Promise<SubtitleTh[]> {
     console.warn('[DEBUG] Looking for IDs starting with or containing:', mediaId);
   }
   
+  // Warn if count doesn't match expected (will be caught by validation in setSubtitleCache)
+  if (expectedCount > 0 && sorted.length !== expectedCount) {
+    console.warn('[DEBUG] fetchSubtitles: Count mismatch detected. Fetched:', sorted.length, 'Expected:', expectedCount, 'Max index:', maxIndex);
+  }
+  
   // Validate with Zod schema before returning
+  // #region agent log
+  if (sorted.length > 0) {
+    const firstSub = sorted[0];
+    const firstSubTokensTh = firstSub?.tokens_th;
+    const firstSubTokens = firstSubTokensTh && typeof firstSubTokensTh === 'object' && 'tokens' in firstSubTokensTh ? (firstSubTokensTh as any).tokens : null;
+    const firstToken = firstSubTokens?.[0];
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:fetchSubtitles',message:'Raw DB data before schema',data:{subtitleId:firstSub?.id,hasTokensTh:!!firstSubTokensTh,tokenCount:firstSubTokens?.length || 0,firstTokenType:typeof firstToken,firstTokenValue:firstToken,firstTokenStringified:JSON.stringify(firstToken)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'RED_BG'})}).catch(()=>{});
+  }
+  // #endregion
   return sorted.map(sub => subtitleThSchema.parse(sub));
 }
 
@@ -224,7 +267,7 @@ export async function saveTokenMeaningSelection(
   subtitleId: string,
   tokenIndex: number,
   meaningId: bigint
-): Promise<void> {
+): Promise<SubtitleTh> {
   // #region agent log
   fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:saveTokenMeaningSelection',message:'Function entry',data:{subtitleId,tokenIndex,meaningId:meaningId.toString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MEANING_SELECT'})}).catch(()=>{});
   // #endregion
@@ -322,12 +365,14 @@ export async function saveTokenMeaningSelection(
   const validated = subtitleThSchema.parse(updatedSubtitle);
   
   // Convert BigInt values to numbers/strings for JSON serialization before saving
+  // CRITICAL: Ensure all BigInt values are converted to prevent serialization errors
   const serializableTokens = validated.tokens_th!.tokens.map((token) => {
     if (typeof token === 'string') {
       return token;
     }
     const tokenObj = token as { t: string; meaning_id?: bigint };
-    if (tokenObj.meaning_id !== undefined) {
+    if (tokenObj.meaning_id !== undefined && tokenObj.meaning_id !== null) {
+      // Convert BigInt to number (if safe) or string for JSON serialization
       const meaningIdValue = tokenObj.meaning_id <= BigInt(Number.MAX_SAFE_INTEGER)
         ? Number(tokenObj.meaning_id)
         : tokenObj.meaning_id.toString();
@@ -339,31 +384,80 @@ export async function saveTokenMeaningSelection(
     return { t: tokenObj.t };
   });
   
+  // Verify payload is serializable before sending to Supabase
+  // #region agent log
+  try {
+    JSON.stringify(serializableTokens);
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:saveTokenMeaningSelection',message:'Payload serialization check passed',data:{subtitleId,tokenIndex,serializableTokenCount:serializableTokens.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MEANING_SELECT'})}).catch(()=>{});
+  } catch (serializeError) {
+    const errorMsg = serializeError instanceof Error ? serializeError.message : String(serializeError);
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:saveTokenMeaningSelection',message:'Payload serialization check failed',data:{subtitleId,tokenIndex,error:errorMsg},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MEANING_SELECT'})}).catch(()=>{});
+    throw new Error(`Cannot serialize tokens payload: ${errorMsg}`);
+  }
+  // #endregion
+  
   // Save to database
   // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:saveTokenMeaningSelection',message:'Saving to DB',data:{subtitleId,tokenIndex,meaningId:meaningId.toString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MEANING_SELECT'})}).catch(()=>{});
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:saveTokenMeaningSelection',message:'Saving to DB',data:{subtitleId,tokenIndex,meaningId:meaningId.toString(),serializableTokenCount:serializableTokens.length,firstTokenHasMeaningId:serializableTokens[0] && typeof serializableTokens[0] === 'object' && 'meaning_id' in serializableTokens[0]},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_SAVE'})}).catch(()=>{});
   // #endregion
-  const { error: saveError } = await supabase
-    .from('subtitles_th')
-    .update({
-      tokens_th: {
-        tokens: serializableTokens,
-      },
-    })
-    .eq('id', subtitleId);
-  
-  if (saveError) {
+  let verifiedSubtitle: SubtitleTh;
+  try {
+    const { error: saveError, data: saveData } = await supabase
+      .from('subtitles_th')
+      .update({
+        tokens_th: {
+          tokens: serializableTokens,
+        },
+      })
+      .eq('id', subtitleId)
+      .select(); // CRITICAL: Select updated row to verify save succeeded
+    
+    if (saveError) {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:saveTokenMeaningSelection',message:'DB_SAVE_ERROR',data:{subtitleId,error:saveError.message,code:saveError.code},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_SAVE'})}).catch(()=>{});
+      // #endregion
+      console.error(`[Save] ✗ Failed to save token meaning selection:`, saveError);
+      throw new Error(`Failed to save token meaning selection: ${saveError.message}`);
+    }
+    
+    // CRITICAL: Verify save succeeded by checking returned data
+    if (!saveData || saveData.length === 0) {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:saveTokenMeaningSelection',message:'DB_VERIFY_FAILED_NO_DATA',data:{subtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_SAVE'})}).catch(()=>{});
+      // #endregion
+      throw new Error(`Failed to save token meaning selection: No data returned from update`);
+    }
+    
+    // Validate verified subtitle from DB response
+    verifiedSubtitle = subtitleThSchema.parse(saveData[0]);
+    const verifiedTokenMeaningIds = verifiedSubtitle.tokens_th?.tokens?.map((t, idx) => {
+      if (typeof t === 'object' && t !== null && 'meaning_id' in t) {
+        return { index: idx, meaningId: (t as any).meaning_id?.toString() || null };
+      }
+      return { index: idx, meaningId: null };
+    }) || [];
+    const verifiedMeaningIdCount = verifiedTokenMeaningIds.filter(t => t.meaningId !== null).length;
+    const targetTokenHasMeaningId = verifiedTokenMeaningIds[tokenIndex]?.meaningId !== null;
+    
     // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:saveTokenMeaningSelection',message:'Save error',data:{subtitleId,error:saveError.message,code:saveError.code},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MEANING_SELECT'})}).catch(()=>{});
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:saveTokenMeaningSelection',message:'DB_SAVE_VERIFIED_FROM_DB',data:{subtitleId,tokenIndex,meaningId:meaningId.toString(),verifiedMeaningIdCount,tokenCount:verifiedTokenMeaningIds.length,targetTokenHasMeaningId,allTokenMeaningIds:verifiedTokenMeaningIds},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_SAVE'})}).catch(()=>{});
     // #endregion
-    console.error(`[Save] ✗ Failed to save token meaning selection:`, saveError);
-    throw new Error(`Failed to save token meaning selection: ${saveError.message}`);
+  } catch (error) {
+    // #region agent log
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:saveTokenMeaningSelection',message:'DB_SAVE_EXCEPTION',data:{subtitleId,error:errorMsg,isBigIntError:errorMsg.includes('BigInt')},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_SAVE'})}).catch(()=>{});
+    // #endregion
+    throw error; // CRITICAL: Re-throw - if DB save fails, cache should NOT be updated
   }
   
   // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:saveTokenMeaningSelection',message:'Function exit - success',data:{subtitleId,tokenIndex,meaningId:meaningId.toString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MEANING_SELECT'})}).catch(()=>{});
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:saveTokenMeaningSelection',message:'DB_SAVE_SUCCESS',data:{subtitleId,tokenIndex,meaningId:meaningId.toString()},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_SAVE'})}).catch(()=>{});
   // #endregion
   console.log(`[Save] ✓ Successfully saved meaning selection for subtitle ${subtitleId}, token index ${tokenIndex}`);
+  
+  // CRITICAL: Return verified subtitle from DB so caller can update cache with DB data
+  // DB is the ultimate source of truth - cache must match what's actually in DB
+  return verifiedSubtitle;
 }
 
 /**
@@ -629,6 +723,9 @@ export async function saveSenses(
   senses: Array<{
     id: bigint;
     definition_th: string;
+    definition_eng: string;
+    pos_eng: string;
+    pos_th: string;
     source?: string;
     created_at?: string;
     word_th_id?: string;
@@ -654,6 +751,9 @@ export async function saveSenses(
   const meaningData = validatedSenses.map((sense) => ({
     id: sense.id.toString(),
     definition_th: sense.definition_th,
+    definition_eng: sense.definition_eng,
+    pos_eng: sense.pos_eng,
+    pos_th: sense.pos_th,
     word_th_id: sense.word_th_id || null,
     source: sense.source || null,
     created_at: sense.created_at || null,
@@ -718,6 +818,9 @@ function generateMeaningId(): bigint {
 export async function createMeaning(
   wordTh: string,
   definitionTh: string,
+  definitionEng: string,
+  posEng: string,
+  posTh: string,
   source?: string
 ): Promise<MeaningTh> {
   console.log(`[Create] Creating new meaning for word "${wordTh}"`);
@@ -726,12 +829,27 @@ export async function createMeaning(
     throw new Error('definition_th is required and cannot be empty');
   }
   
+  if (!definitionEng || definitionEng.trim().length === 0) {
+    throw new Error('definition_eng is required and cannot be empty');
+  }
+  
+  if (!posEng || posEng.trim().length === 0) {
+    throw new Error('pos_eng is required and cannot be empty');
+  }
+  
+  if (!posTh || posTh.trim().length === 0) {
+    throw new Error('pos_th is required and cannot be empty');
+  }
+  
   const meaningId = generateMeaningId();
   const now = new Date().toISOString();
   
   // Prepare data for validation (without id and created_at for input validation)
   const meaningData = {
     definition_th: definitionTh.trim(),
+    definition_eng: definitionEng.trim(),
+    pos_eng: posEng.trim(),
+    pos_th: posTh.trim(),
     word_th_id: wordTh,
     source: source?.trim() || undefined,
   };
@@ -745,6 +863,9 @@ export async function createMeaning(
   const dbData = {
     id: meaningId.toString(),
     definition_th: meaningData.definition_th,
+    definition_eng: meaningData.definition_eng,
+    pos_eng: meaningData.pos_eng,
+    pos_th: meaningData.pos_th,
     word_th_id: meaningData.word_th_id || null,
     source: meaningData.source || null,
     created_at: now,
@@ -785,7 +906,13 @@ export async function createMeaning(
  */
 export async function updateMeaning(
   meaningId: bigint,
-  updates: { definition_th?: string; source?: string }
+  updates: { 
+    definition_th?: string; 
+    definition_eng?: string;
+    pos_eng?: string;
+    pos_th?: string;
+    source?: string 
+  }
 ): Promise<MeaningTh> {
   console.log(`[Update] Updating meaning with ID ${meaningId.toString()}`);
   
@@ -798,14 +925,53 @@ export async function updateMeaning(
     updates.definition_th = trimmed;
   }
   
+  if (updates.definition_eng !== undefined) {
+    const trimmed = updates.definition_eng.trim();
+    if (trimmed.length === 0) {
+      throw new Error('definition_eng cannot be empty');
+    }
+    updates.definition_eng = trimmed;
+  }
+  
+  if (updates.pos_eng !== undefined) {
+    const trimmed = updates.pos_eng.trim();
+    if (trimmed.length === 0) {
+      throw new Error('pos_eng cannot be empty');
+    }
+    updates.pos_eng = trimmed;
+  }
+  
+  if (updates.pos_th !== undefined) {
+    const trimmed = updates.pos_th.trim();
+    if (trimmed.length === 0) {
+      throw new Error('pos_th cannot be empty');
+    }
+    updates.pos_th = trimmed;
+  }
+  
   if (updates.source !== undefined) {
     updates.source = updates.source.trim() || undefined;
   }
   
   // Prepare update data (only include provided fields)
-  const updateData: { definition_th?: string; source?: string | null } = {};
+  const updateData: { 
+    definition_th?: string; 
+    definition_eng?: string;
+    pos_eng?: string;
+    pos_th?: string;
+    source?: string | null 
+  } = {};
   if (updates.definition_th !== undefined) {
     updateData.definition_th = updates.definition_th;
+  }
+  if (updates.definition_eng !== undefined) {
+    updateData.definition_eng = updates.definition_eng;
+  }
+  if (updates.pos_eng !== undefined) {
+    updateData.pos_eng = updates.pos_eng;
+  }
+  if (updates.pos_th !== undefined) {
+    updateData.pos_th = updates.pos_th;
   }
   if (updates.source !== undefined) {
     updateData.source = updates.source || null;

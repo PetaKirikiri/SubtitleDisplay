@@ -44,7 +44,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Indicates we will send a response asynchronously
   }
   
-  if (message.type === 'INJECT_NETFLIX_SEEK_SCRIPT') {
+  if (message.type === 'INJECT_NETFLIX_PLAYER_SCRIPT') {
     // Background script has access to chrome.tabs API
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs || tabs.length === 0 || !tabs[0].id) {

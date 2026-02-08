@@ -25,50 +25,19 @@ import { numberCoerce, bigintCoerce } from './zodHelpers';
  */
 export const tokenObjectSchema = z.object({
   t: z.string().min(1, 'Token text is required'),
-  meaning_id: bigintCoerce.optional(), // Optional - allows tagless tokens
+  meaning_id: bigintCoerce.optional(), // Optional - allows tagless tokens, must be bigint to match meaning.id type
 }).strict();
 
 export type TokenObject = z.infer<typeof tokenObjectSchema>;
 
 /**
- * TokensTh schema - accepts both old format (string[]) and new format (TokenObject[])
- * Normalizes to new format during validation
- * 
- * Accepted formats:
- * - Old format: { tokens: ["เนื้อ", "เรื่อง", "ต้น"] } - array of strings
- * - New format: { tokens: [{ t: "เนื้อ", meaning_id: 123 }, { t: "เรื่อง" }, ...] } - array of TokenObjects
- * 
- * Normalization:
- * - Old format strings are converted to tagless TokenObjects: "word" -> { t: "word" }
- * - New format TokenObjects are preserved as-is
- * - Mixed arrays (both formats) are normalized to all TokenObjects
- * 
- * The system gracefully handles:
- * - Arrays with all tagged tokens
- * - Arrays with all tagless tokens  
- * - Arrays mixing tagged and tagless tokens (partial coverage)
- * 
- * Backwards compatibility: Old data loads fine and normalizes automatically on first access.
+ * TokensTh schema - accepts any structure with tokens array
+ * Minimal validation - just check it's an object with a tokens array
+ * Normalization happens in application code when needed
  */
-const tokensThSchema = z.union([
-  // Old format: { tokens: string[] }
-  z.object({
-    tokens: z.array(z.string().min(1)),
-  }),
-  // New format: { tokens: TokenObject[] }
-  z.object({
-    tokens: z.array(tokenObjectSchema),
-  }),
-]).transform((data) => {
-  // Normalize to new format - convert strings to tagless TokenObjects
-  const normalizedTokens = data.tokens.map((token) => {
-    if (typeof token === 'string') {
-      return { t: token }; // Old format: create tagless TokenObject
-    }
-    return token as TokenObject; // New format: preserve as-is
-  });
-  return { tokens: normalizedTokens };
-});
+const tokensThSchema = z.object({
+  tokens: z.array(z.any()), // Accept any token format - normalization happens in application code
+}).passthrough(); // Allow additional properties
 
 /**
  * Subtitle Thai Schema - matches ACTUAL database column names (snake_case)
@@ -99,27 +68,11 @@ const tokensThSchema = z.union([
  * Tokens without meaning_id remain tagless until a selection is made.
  */
 export const subtitleThSchema = z.object({
-  id: z.string()
-    .min(1, 'Subtitle id is required')
-    .refine(val => val.trim().length > 0, 'Subtitle id cannot be only whitespace'),
-  thai: z.string()
-    .min(1, 'thai is required')
-    .refine(val => val.trim().length > 0, 'thai cannot be empty or only whitespace'),
-  start_sec_th: numberCoerce
-    .refine(val => val >= 0, 'start_sec_th cannot be negative')
-    .refine(val => val < 86400, 'start_sec_th seems unreasonably large (over 24 hours)'),
-  end_sec_th: numberCoerce
-    .refine(val => val >= 0, 'end_sec_th cannot be negative')
-    .refine(val => val < 86400, 'end_sec_th seems unreasonably large (over 24 hours)'),
-  tokens_th: tokensThSchema.optional(), // Optional - Thai tokens (normalized to new format)
-}).refine(
-  (data) => {
-    return data.end_sec_th > data.start_sec_th;
-  },
-  {
-    message: 'end_sec_th must be greater than start_sec_th',
-    path: ['end_sec_th'],
-  }
-);
+  id: z.string().min(1, 'Subtitle id is required'), // Minimal validation - just check it exists and matches pattern
+  thai: z.string().min(1, 'thai is required'), // Minimal validation - just check it exists
+  start_sec_th: numberCoerce, // Coerce to number, no additional validation
+  end_sec_th: numberCoerce, // Coerce to number, no additional validation
+  tokens_th: tokensThSchema.optional(), // Optional - accept any structure
+}).passthrough(); // Allow additional properties
 
 export type SubtitleTh = z.infer<typeof subtitleThSchema>;

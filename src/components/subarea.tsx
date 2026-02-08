@@ -1,18 +1,15 @@
 import React, { useEffect } from 'react';
-import type { DisplayMode } from '../services/subtitleDisplayLogic';
-import { hasTokens } from '../services/subtitleDisplayLogic';
-import type { SubtitleTh } from '@/schemas/subtitleThSchema';
+import type { DisplayMode } from '../types/display';
+import type { SubtitleTh, TokenObject } from '@/schemas/subtitleThSchema';
 import { SubtitleDisplayModeDropdown } from './SubtitleDisplayModeDropdown';
-import type { TokenObject } from '@/types/token';
-import { getTokenText, hasMeaningSelection } from '@/services/tokenCodec';
 
 export interface SubAreaProps {
   displayText: string;
   displayMode: DisplayMode;
   onDisplayModeChange: (mode: DisplayMode) => void;
   currentSubtitle: SubtitleTh | null;
-  tokens?: TokenObject[] | string[];
-  onTokenClick?: (token: TokenObject | string, index: number) => void;
+  tokens?: TokenObject[] | string[]; // Pass tokens directly
+  onTokenClick?: (index: number) => void;
   selectedTokenIndex?: number | null;
 }
 
@@ -33,13 +30,16 @@ export const SubArea: React.FC<SubAreaProps> = ({
       <SubtitleDisplayModeDropdown
         currentMode={displayMode}
         onModeChange={onDisplayModeChange}
-        hasTokens={hasTokens(currentSubtitle)}
+        hasTokens={!!(currentSubtitle?.tokens_th?.tokens && currentSubtitle.tokens_th.tokens.length > 0)}
       />
       {displayMode === 'tokens' && tokens ? (
         <div className="flex flex-wrap justify-center gap-2">
           {tokens.map((token, index) => {
-            const tokenText = getTokenText(token);
-            const hasSelection = hasMeaningSelection(token);
+            // Check meaning_id directly - no helper function needed
+            const hasMeaning = typeof token === 'object' && token !== null && 'meaning_id' in token 
+              ? token.meaning_id !== undefined && token.meaning_id !== null 
+              : false;
+            const tokenText = typeof token === 'string' ? token : token.t;
             const isCurrentToken = selectedTokenIndex !== null && selectedTokenIndex !== undefined && index === selectedTokenIndex;
             
             return (
@@ -48,17 +48,17 @@ export const SubArea: React.FC<SubAreaProps> = ({
                 className={`select-text cursor-pointer px-1 rounded transition-colors ${
                   isCurrentToken
                     ? 'border-4 border-yellow-400 bg-yellow-400/20 shadow-lg shadow-yellow-400/50'
-                    : hasSelection
+                    : hasMeaning
                     ? 'bg-[#e50914]/20 border border-[#e50914]/50 hover:bg-[#e50914]/30'
                     : 'hover:bg-white/20'
                 }`}
                 onClick={(e) => {
                   // Only trigger click if no text is selected
                   if (window.getSelection()?.toString().length === 0) {
-                    onTokenClick?.(token, index);
+                    onTokenClick?.(index);
                   }
                 }}
-                title={hasSelection ? 'Meaning selected' : isCurrentToken ? 'Currently editing' : 'Click to select meaning'}
+                title={hasMeaning ? 'Meaning selected' : isCurrentToken ? 'Currently editing' : 'Click to select meaning'}
               >
                 {tokenText}
               </span>

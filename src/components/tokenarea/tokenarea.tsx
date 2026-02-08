@@ -1,6 +1,9 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { fetchMeaningsByWordTh, updateMeaning, deleteMeaning, createMeaning } from '../supabase';
+import { updateMeaning, deleteMeaning, createMeaning } from '../../supabase';
+import { getMeanings, invalidateMeanings, saveTokenMeaning } from '../../hooks/useSubtitles';
+import { setSubtitleCache } from '../../services/cache/subtitleNavigation';
 import type { MeaningTh } from '@/schemas/meaningThSchema';
+import type { SubtitleTh } from '@/schemas/subtitleThSchema';
 
 interface MeaningCardProps {
   meaning: MeaningTh;
@@ -26,6 +29,9 @@ const MeaningCard: React.FC<MeaningCardProps> = ({
   const [isHovered, setIsHovered] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editedText, setEditedText] = useState(meaning.definition_th);
+  const [editedDefinitionEng, setEditedDefinitionEng] = useState(meaning.definition_eng);
+  const [editedPosEng, setEditedPosEng] = useState(meaning.pos_eng);
+  const [editedPosTh, setEditedPosTh] = useState(meaning.pos_th);
   const [editedSource, setEditedSource] = useState(meaning.source || '');
   const [isSaving, setIsSaving] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -56,18 +62,39 @@ const MeaningCard: React.FC<MeaningCardProps> = ({
     e.stopPropagation();
     setIsEditing(true);
     setEditedText(meaning.definition_th);
+    setEditedDefinitionEng(meaning.definition_eng);
+    setEditedPosEng(meaning.pos_eng);
+    setEditedPosTh(meaning.pos_th);
     setEditedSource(meaning.source || '');
   };
 
   const handleCancel = () => {
     setIsEditing(false);
     setEditedText(meaning.definition_th);
+    setEditedDefinitionEng(meaning.definition_eng);
+    setEditedPosEng(meaning.pos_eng);
+    setEditedPosTh(meaning.pos_th);
     setEditedSource(meaning.source || '');
   };
 
   const handleSave = async () => {
     if (!editedText.trim()) {
-      alert('Definition cannot be empty');
+      alert('Definition (Thai) cannot be empty');
+      return;
+    }
+    
+    if (!editedDefinitionEng.trim()) {
+      alert('Definition (English) cannot be empty');
+      return;
+    }
+    
+    if (!editedPosEng.trim()) {
+      alert('Part of speech (English) cannot be empty');
+      return;
+    }
+    
+    if (!editedPosTh.trim()) {
+      alert('Part of speech (Thai) cannot be empty');
       return;
     }
 
@@ -75,6 +102,9 @@ const MeaningCard: React.FC<MeaningCardProps> = ({
     try {
       const updated = await updateMeaning(meaning.id, {
         definition_th: editedText.trim(),
+        definition_eng: editedDefinitionEng.trim(),
+        pos_eng: editedPosEng.trim(),
+        pos_th: editedPosTh.trim(),
         source: editedSource.trim() || undefined,
       });
       setIsEditing(false);
@@ -167,26 +197,66 @@ const MeaningCard: React.FC<MeaningCardProps> = ({
           <div className="flex-1 pr-16">
             {isEditing ? (
               <div className="space-y-4">
-                <textarea
-                  ref={textareaRef}
-                  value={editedText}
-                  onChange={(e) => setEditedText(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  className="w-full bg-white/10 border border-white/20 rounded p-3 text-white/90 leading-loose focus:outline-none focus:border-[#e50914] resize-y min-h-[120px]"
-                  placeholder="Enter definition..."
-                />
-                <input
-                  type="text"
-                  value={editedSource}
-                  onChange={(e) => setEditedSource(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  className="w-full bg-white/10 border border-white/20 rounded p-2 text-white/90 focus:outline-none focus:border-[#e50914]"
-                  placeholder="Source (optional)"
-                />
+                <div>
+                  <div className="block text-white/70 text-sm mb-1">Definition (Thai)</div>
+                  <textarea
+                    ref={textareaRef}
+                    value={editedText}
+                    onChange={(e) => setEditedText(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    className="w-full bg-white/10 border border-white/20 rounded p-3 text-white/90 leading-loose focus:outline-none focus:border-[#e50914] resize-y min-h-[120px]"
+                    placeholder="Enter Thai definition..."
+                  />
+                </div>
+                <div>
+                  <div className="block text-white/70 text-sm mb-1">Definition (English)</div>
+                  <textarea
+                    value={editedDefinitionEng}
+                    onChange={(e) => setEditedDefinitionEng(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    className="w-full bg-white/10 border border-white/20 rounded p-3 text-white/90 leading-loose focus:outline-none focus:border-[#e50914] resize-y min-h-[120px]"
+                    placeholder="Enter English definition..."
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <div className="block text-white/70 text-sm mb-1">POS (Thai)</div>
+                    <input
+                      type="text"
+                      value={editedPosTh}
+                      onChange={(e) => setEditedPosTh(e.target.value)}
+                      onKeyDown={handleKeyDown}
+                      className="w-full bg-white/10 border border-white/20 rounded p-2 text-white/90 focus:outline-none focus:border-[#e50914]"
+                      placeholder="Part of speech (Thai)"
+                    />
+                  </div>
+                  <div>
+                    <div className="block text-white/70 text-sm mb-1">POS (English)</div>
+                    <input
+                      type="text"
+                      value={editedPosEng}
+                      onChange={(e) => setEditedPosEng(e.target.value)}
+                      onKeyDown={handleKeyDown}
+                      className="w-full bg-white/10 border border-white/20 rounded p-2 text-white/90 focus:outline-none focus:border-[#e50914]"
+                      placeholder="Part of speech (English)"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <div className="block text-white/70 text-sm mb-1">Source (optional)</div>
+                  <input
+                    type="text"
+                    value={editedSource}
+                    onChange={(e) => setEditedSource(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    className="w-full bg-white/10 border border-white/20 rounded p-2 text-white/90 focus:outline-none focus:border-[#e50914]"
+                    placeholder="Source (optional)"
+                  />
+                </div>
                 <div className="flex gap-3">
                   <button
                     onClick={handleSave}
-                    disabled={isSaving || !editedText.trim()}
+                    disabled={isSaving || !editedText.trim() || !editedDefinitionEng.trim() || !editedPosEng.trim() || !editedPosTh.trim()}
                     className="px-6 py-2 bg-[#e50914] text-white rounded hover:bg-[#e50914]/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
                     {isSaving ? 'Saving...' : 'Save'}
@@ -205,14 +275,22 @@ const MeaningCard: React.FC<MeaningCardProps> = ({
               </div>
             ) : (
               <>
-                <div className="text-white/90 leading-loose select-text">
-                  {meaning.definition_th}
-                </div>
-                {meaning.source && (
-                  <div className="mt-2 text-white/60 select-text">
-                    Source: {meaning.source}
+                <div className="mb-3">
+                  <div className="flex gap-2 mb-2">
+                    <div className="px-4 py-3 bg-[#e50914]/20 text-[#e50914] rounded text-2xl font-semibold select-text">
+                      {meaning.pos_th}
+                    </div>
+                    <div className="px-4 py-3 bg-white/10 text-white/70 rounded text-2xl select-text">
+                      {meaning.pos_eng}
+                    </div>
                   </div>
-                )}
+                  <div className="text-white/90 leading-loose select-text">
+                    {meaning.definition_th}
+                  </div>
+                  <div className="mt-2 text-white/70 leading-loose select-text">
+                    {meaning.definition_eng}
+                  </div>
+                </div>
                 {isSelected && (
                   <div className="mt-2 text-[#e50914] font-semibold">
                     ✓ Selected
@@ -268,8 +346,11 @@ export interface TokenAreaProps {
   subtitleId?: string | null;
   tokenIndex?: number | null;
   selectedMeaningId?: bigint | null;
-  onMeaningSelect?: (tokenIndex: number, meaningId: bigint) => void;
+  subtitles?: SubtitleTh[];
+  currentSubtitle?: SubtitleTh | null;
+  onMeaningSelect?: (tokenIndex: number, meaningId: bigint) => void; // Called when meaning is selected - component handles save internally
   onMeaningsFetched?: (meanings: MeaningTh[]) => void;
+  onMeaningSelectComplete?: () => void; // Called after save completes - parent can refresh
 }
 
 export const TokenArea: React.FC<TokenAreaProps> = ({ 
@@ -277,18 +358,29 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
   subtitleId, 
   tokenIndex, 
   selectedMeaningId, 
+  subtitles = [],
+  currentSubtitle = null,
   onMeaningSelect,
-  onMeaningsFetched
+  onMeaningsFetched,
+  onMeaningSelectComplete
 }) => {
+  // #region agent log
+  const selectedMeaningIdType = typeof selectedMeaningId;
+  const selectedMeaningIdValue = selectedMeaningId?.toString() || null;
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenarea.tsx:TokenArea',message:'TOKENAREA_RECEIVED_PROPS',data:{selectedToken,subtitleId,tokenIndex,selectedMeaningIdType,selectedMeaningIdValue},timestamp:Date.now(),runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+  // #endregion
   const [meanings, setMeanings] = useState<MeaningTh[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [newDefinition, setNewDefinition] = useState('');
+  const [newDefinitionEng, setNewDefinitionEng] = useState('');
+  const [newPosEng, setNewPosEng] = useState('');
+  const [newPosTh, setNewPosTh] = useState('');
   const [newSource, setNewSource] = useState('');
   const [isSavingNew, setIsSavingNew] = useState(false);
   const newTextareaRef = useRef<HTMLTextAreaElement>(null);
   
-  // Function to fetch meanings
+  // Function to fetch meanings (cache-first via TanStack Query)
   const fetchMeanings = async () => {
     if (!selectedToken) {
       setMeanings([]);
@@ -298,7 +390,8 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
     
     setIsLoading(true);
     try {
-      const fetchedMeanings = await fetchMeaningsByWordTh(selectedToken);
+      // Use TanStack Query for cache-first behavior - returns cached data immediately if available
+      const fetchedMeanings = await getMeanings(selectedToken);
       setMeanings(fetchedMeanings);
       // Notify parent component of fetched meanings
       if (onMeaningsFetched) {
@@ -331,48 +424,149 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
   
   // Handle meaning update
   const handleMeaningUpdate = async (updatedMeaning: MeaningTh) => {
+    if (selectedToken) {
+      // Invalidate cache so next fetch gets fresh data
+      await invalidateMeanings(selectedToken);
+    }
     setMeanings(prev => prev.map(m => m.id === updatedMeaning.id ? updatedMeaning : m));
-    // Refresh to ensure consistency
+    // Refresh to ensure consistency (will use cache if fresh, or fetch if stale)
     await fetchMeanings();
   };
   
   // Handle meaning delete
   const handleMeaningDelete = async (meaningId: bigint) => {
+    if (selectedToken) {
+      // Invalidate cache so next fetch gets fresh data
+      await invalidateMeanings(selectedToken);
+    }
     setMeanings(prev => prev.filter(m => m.id !== meaningId));
-    // Refresh to ensure consistency
+    // Refresh to ensure consistency (will use cache if fresh, or fetch if stale)
     await fetchMeanings();
   };
+
+  // Handle meaning selection - save to DB and update cache
+  const handleMeaningSelectInternal = async (tokenIdx: number, meaningId: bigint) => {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenarea.tsx:handleMeaningSelectInternal',message:'TOKENAREA_SAVE_ENTRY',data:{tokenIdx,meaningId:meaningId.toString(),subtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    
+    if (!subtitleId) {
+      console.error('[TokenArea] Cannot save meaning selection: no subtitle ID');
+      return;
+    }
+
+    // Extract mediaId from subtitleId (format: `${mediaId}_${index}`)
+    const lastUnderscoreIndex = subtitleId.lastIndexOf('_');
+    const mediaId = lastUnderscoreIndex !== -1 ? subtitleId.substring(0, lastUnderscoreIndex) : subtitleId;
+
+    try {
+      // Save to DB using TanStack Query mutation (handles cache invalidation)
+      const verifiedSubtitleFromDB = await saveTokenMeaning(subtitleId, tokenIdx, meaningId, mediaId);
+
+      // #region agent log
+      const verifiedMeaningId = verifiedSubtitleFromDB?.tokens_th?.tokens?.[tokenIdx] && typeof verifiedSubtitleFromDB.tokens_th.tokens[tokenIdx] === 'object' && 'meaning_id' in verifiedSubtitleFromDB.tokens_th.tokens[tokenIdx] ? (verifiedSubtitleFromDB.tokens_th.tokens[tokenIdx] as any).meaning_id?.toString() : null;
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenarea.tsx:handleMeaningSelectInternal',message:'AFTER_DB_SAVE',data:{tokenIdx,meaningId:meaningId.toString(),verifiedMeaningId},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+
+      // Update subtitle cache with verified subtitle from DB (source of truth)
+      if (subtitles.length > 0) {
+        const updatedSubtitles = subtitles.map(sub => 
+          sub.id === subtitleId 
+            ? verifiedSubtitleFromDB  // Use DB-verified subtitle (source of truth)
+            : sub
+        );
+        setSubtitleCache(updatedSubtitles);
+        
+        // #region agent log
+        fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenarea.tsx:handleMeaningSelectInternal',message:'CACHE_UPDATED',data:{tokenIdx,meaningId:meaningId.toString(),subtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+      }
+
+      // Notify parent that selection completed
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenarea.tsx:handleMeaningSelectInternal',message:'CALLING_ONMEANING_SELECT_COMPLETE',data:{hasCallback:!!onMeaningSelectComplete},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+      onMeaningSelectComplete?.();
+    } catch (error) {
+      console.error('[TokenArea] Failed to save meaning selection:', error);
+      alert(`Failed to save meaning selection: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  
+  // Expose handler for external calls (e.g., hotkeys)
+  useEffect(() => {
+    if (subtitleId && tokenIndex !== null && tokenIndex !== undefined) {
+      // Store the handler so it can be called externally
+      (window as any).__tokenAreaSelectMeaning = handleMeaningSelectInternal;
+    }
+    return () => {
+      delete (window as any).__tokenAreaSelectMeaning;
+    };
+  }, [subtitleId, tokenIndex, subtitles]);
   
   // Handle create new meaning
   const handleCreateNew = () => {
     setIsCreating(true);
     setNewDefinition('');
+    setNewDefinitionEng('');
+    setNewPosEng('');
+    setNewPosTh('');
     setNewSource('');
   };
   
   const handleCancelCreate = () => {
     setIsCreating(false);
     setNewDefinition('');
+    setNewDefinitionEng('');
+    setNewPosEng('');
+    setNewPosTh('');
     setNewSource('');
   };
   
   const handleSaveNew = async () => {
     if (!selectedToken || !newDefinition.trim()) {
-      alert('Definition cannot be empty');
+      alert('Definition (Thai) cannot be empty');
+      return;
+    }
+    
+    if (!newDefinitionEng.trim()) {
+      alert('Definition (English) cannot be empty');
+      return;
+    }
+    
+    if (!newPosEng.trim()) {
+      alert('Part of speech (English) cannot be empty');
+      return;
+    }
+    
+    if (!newPosTh.trim()) {
+      alert('Part of speech (Thai) cannot be empty');
       return;
     }
     
     setIsSavingNew(true);
     try {
-      const newMeaning = await createMeaning(selectedToken, newDefinition.trim(), newSource.trim() || undefined);
+      const newMeaning = await createMeaning(
+        selectedToken, 
+        newDefinition.trim(), 
+        newDefinitionEng.trim(),
+        newPosEng.trim(),
+        newPosTh.trim(),
+        newSource.trim() || undefined
+      );
       setMeanings(prev => [...prev, newMeaning].sort((a, b) => {
         // Sort by ID (newer meanings typically have higher IDs)
         return Number(a.id - b.id);
       }));
       setIsCreating(false);
       setNewDefinition('');
+      setNewDefinitionEng('');
+      setNewPosEng('');
+      setNewPosTh('');
       setNewSource('');
-      // Refresh to ensure consistency
+      // Invalidate cache so next fetch includes the new meaning
+      await invalidateMeanings(selectedToken);
+      // Refresh to ensure consistency (will fetch fresh data including new meaning)
       await fetchMeanings();
     } catch (error) {
       console.error('[TokenArea] Failed to create meaning:', error);
@@ -413,9 +607,19 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
             </div>
             <div className="space-y-5">
               {meanings.map((meaning, index) => {
+                const meaningIdType = typeof meaning.id;
+                const selectedMeaningIdType = typeof selectedMeaningId;
+                const directComparison = meaning.id === selectedMeaningId;
                 const isSelected = selectedMeaningId !== null && 
                   selectedMeaningId !== undefined && 
-                  meaning.id === selectedMeaningId;
+                  directComparison;
+                
+                // #region agent log
+                if (index === 0 || isSelected) {
+                  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenarea.tsx:render',message:'TOKENAREA_HIGHLIGHT_CHECK',data:{index,selectedMeaningId:selectedMeaningId?.toString() || null,meaningId:meaning.id.toString(),meaningIdType,selectedMeaningIdType,directComparison,isSelected,meaningCount:meanings.length},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+                }
+                // #endregion
+                
                 const canSelect = subtitleId !== null && 
                   subtitleId !== undefined && 
                   tokenIndex !== null && 
@@ -430,7 +634,9 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
                     isSelected={isSelected}
                     canSelect={canSelect}
                     tokenIndex={tokenIndex}
-                    onMeaningSelect={onMeaningSelect}
+                    onMeaningSelect={tokenIndex !== null && tokenIndex !== undefined ? (idx, meaningId) => {
+                      handleMeaningSelectInternal(idx, meaningId);
+                    } : undefined}
                     onMeaningUpdate={handleMeaningUpdate}
                     onMeaningDelete={handleMeaningDelete}
                   />
@@ -442,26 +648,66 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
                 <div className="bg-white/5 border-2 border-dashed border-[#e50914]/50 rounded-lg p-6">
                   <div className="space-y-4">
                     <div className="text-white font-semibold mb-4">Add New Meaning</div>
-                    <textarea
-                      ref={newTextareaRef}
-                      value={newDefinition}
-                      onChange={(e) => setNewDefinition(e.target.value)}
-                      onKeyDown={handleNewKeyDown}
-                      className="w-full bg-white/10 border border-white/20 rounded p-3 text-white/90 leading-loose focus:outline-none focus:border-[#e50914] resize-y min-h-[120px]"
-                      placeholder="Enter definition..."
-                    />
-                    <input
-                      type="text"
-                      value={newSource}
-                      onChange={(e) => setNewSource(e.target.value)}
-                      onKeyDown={handleNewKeyDown}
-                      className="w-full bg-white/10 border border-white/20 rounded p-2 text-white/90 focus:outline-none focus:border-[#e50914]"
-                      placeholder="Source (optional)"
-                    />
+                    <div>
+                      <div className="block text-white/70 text-sm mb-1">Definition (Thai)</div>
+                      <textarea
+                        ref={newTextareaRef}
+                        value={newDefinition}
+                        onChange={(e) => setNewDefinition(e.target.value)}
+                        onKeyDown={handleNewKeyDown}
+                        className="w-full bg-white/10 border border-white/20 rounded p-3 text-white/90 leading-loose focus:outline-none focus:border-[#e50914] resize-y min-h-[120px]"
+                        placeholder="Enter Thai definition..."
+                      />
+                    </div>
+                    <div>
+                      <div className="block text-white/70 text-sm mb-1">Definition (English)</div>
+                      <textarea
+                        value={newDefinitionEng}
+                        onChange={(e) => setNewDefinitionEng(e.target.value)}
+                        onKeyDown={handleNewKeyDown}
+                        className="w-full bg-white/10 border border-white/20 rounded p-3 text-white/90 leading-loose focus:outline-none focus:border-[#e50914] resize-y min-h-[120px]"
+                        placeholder="Enter English definition..."
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <div className="block text-white/70 text-sm mb-1">POS (Thai)</div>
+                        <input
+                          type="text"
+                          value={newPosTh}
+                          onChange={(e) => setNewPosTh(e.target.value)}
+                          onKeyDown={handleNewKeyDown}
+                          className="w-full bg-white/10 border border-white/20 rounded p-2 text-white/90 focus:outline-none focus:border-[#e50914]"
+                          placeholder="Part of speech (Thai)"
+                        />
+                      </div>
+                      <div>
+                        <div className="block text-white/70 text-sm mb-1">POS (English)</div>
+                        <input
+                          type="text"
+                          value={newPosEng}
+                          onChange={(e) => setNewPosEng(e.target.value)}
+                          onKeyDown={handleNewKeyDown}
+                          className="w-full bg-white/10 border border-white/20 rounded p-2 text-white/90 focus:outline-none focus:border-[#e50914]"
+                          placeholder="Part of speech (English)"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <div className="block text-white/70 text-sm mb-1">Source (optional)</div>
+                      <input
+                        type="text"
+                        value={newSource}
+                        onChange={(e) => setNewSource(e.target.value)}
+                        onKeyDown={handleNewKeyDown}
+                        className="w-full bg-white/10 border border-white/20 rounded p-2 text-white/90 focus:outline-none focus:border-[#e50914]"
+                        placeholder="Source (optional)"
+                      />
+                    </div>
                     <div className="flex gap-3">
                       <button
                         onClick={handleSaveNew}
-                        disabled={isSavingNew || !newDefinition.trim()}
+                        disabled={isSavingNew || !newDefinition.trim() || !newDefinitionEng.trim() || !newPosEng.trim() || !newPosTh.trim()}
                         className="px-6 py-2 bg-[#e50914] text-white rounded hover:bg-[#e50914]/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-semibold"
                       >
                         {isSavingNew ? 'Creating...' : 'Create'}

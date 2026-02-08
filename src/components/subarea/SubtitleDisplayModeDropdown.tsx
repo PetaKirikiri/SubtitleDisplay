@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import type { DisplayMode } from '../types/display';
+import type { DisplayMode } from '../../types/display';
 
 export interface SubtitleDisplayModeDropdownProps {
   currentMode: DisplayMode;
@@ -39,7 +39,7 @@ export const SubtitleDisplayModeDropdown: React.FC<SubtitleDisplayModeDropdownPr
   const currentLabel = MODE_OPTIONS.find(opt => opt.value === currentMode)?.label || 'Thai';
 
   return (
-    <div ref={dropdownRef} className={`absolute top-2 right-2 z-50 ${fontSize}`}>
+    <div ref={dropdownRef} className={`relative ${fontSize}`}>
       <button
         className={`bg-black/80 text-white ${fontSize} px-4 py-2 rounded border border-white/20 hover:bg-black/90 cursor-pointer`}
         onClick={() => setIsOpen(!isOpen)}

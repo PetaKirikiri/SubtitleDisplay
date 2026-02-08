@@ -9,18 +9,22 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { fetchThaiVTTContent, injectNetflixSubtitleScript } from './services/netflixVTTExtractor';
 import { extractEpisodeFromNetflixPage, getMediaIdFromUrl } from './services/netflixMetadataExtractor';
-import { saveEpisode, saveSubtitlesBatch, fetchSubtitles } from './services/supabaseClient';
+import { saveEpisode, saveSubtitlesBatch } from './services/supabaseClient';
+import { getSubtitles } from './hooks/useSubtitles';
 import { parseVTTFile } from '@/services/vtt/vttParser';
 import { getLayoutDimensions, createRectangles, setRectangleGeometry, removeRectangles } from './layoutCalculations';
-import { SubArea } from './components/subarea';
-import { TokenArea } from './components/tokenarea';
-import { formatSubtitleForDisplay, type DisplayMode } from './services/subtitleDisplayLogic';
+import { SubArea } from './components/subarea/subarea';
+import { TokenArea } from './components/tokenarea/tokenarea';
+import type { DisplayMode } from './types/display';
 import type { SubtitleTh } from '@/schemas/subtitleThSchema';
-import { setupArrowKeyNavigation, removeArrowKeyNavigation, setupNumberKeySelection } from './services/hotkeys';
-import { setSubtitleCache, setCurrentSubtitleId, setMostRecentlyDisplayedSubtitleId } from './services/timelineNavigation';
-import { saveTokenMeaningSelection } from './supabase';
-import { normalizeTokens, getTokenMeaningId, hasMeaningSelection } from './services/tokenCodec';
+import { initializeTimelineHotkeys, cleanupTimelineHotkeys } from './services/timelineNavigation/hotkeys-navigation';
+import { initializeMeaningHotkeys, cleanupMeaningHotkeys } from './components/tokenarea/helpers/hotkeys-meaning';
+import { setSubtitleCache, setCurrentSubtitleId, setMostRecentlyDisplayedSubtitleId, getSubtitleById, findCurrentSubtitleByTime } from './services/cache/subtitleNavigation';
+import { handleTokenNavigation } from './components/subarea/helpers/handleTokenNavigation';
+import { unpause, getCurrentTime as getNetflixCurrentTime, pause } from './services/timelineNavigation';
 import type { MeaningTh } from '@/schemas/meaningThSchema';
+import { setMeaningsForToken } from './components/tokenarea/helpers/subtitleMeaningsCache';
+import { handleManualUnpause } from './services/video/handleManualUnpause';
 
 let isExtracting = false;
 let resizeObserver: ResizeObserver | null = null;
@@ -40,7 +44,6 @@ let displayMode: DisplayMode = 'tokens';
 let subtitles: SubtitleTh[] = [];
 let videoTimeHandler: (() => void) | null = null;
 let videoPlayHandler: (() => void) | null = null;
-let updateAbortController: AbortController | null = null;
 
 // Selected token state for meanings display
 let selectedToken: string | null = null;
@@ -51,6 +54,10 @@ let selectedSubtitleId: string | null = null;
 // Maps "subtitleId_tokenIndex" to meanings array
 let meaningsByToken: Map<string, MeaningTh[]> = new Map();
 
+// Flag to prevent time-based subtitle changes immediately after hotkey navigation
+let isHotkeyNavigationActive = false;
+let hotkeyNavigationTimeout: ReturnType<typeof setTimeout> | null = null;
+
 // Editing state - tracks if we're in editing mode (paused for token tagging)
 let isEditingMode: boolean = false;
 
@@ -58,14 +65,27 @@ let isEditingMode: boolean = false;
 let hasInitialPause: boolean = false;
 let hasTokensShown: boolean = false;
 
+
 // Auto-select state - tracks if we should auto-select first meaning when meanings are fetched
 let shouldAutoSelectFirstMeaning: boolean = false;
 
 function setSelectedToken(token: string | null, index: number | null = null, subtitleId: string | null = null): void {
+  // #region agent log
+  const stackTrace = new Error().stack;
+  const callerLocation = stackTrace?.split('\n')[2]?.trim() || 'unknown';
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:setSelectedToken',message:'SET_SELECTED_TOKEN_CALLED',data:{callerLocation,token,index,subtitleId,previousIndex:selectedTokenIndex,previousSubtitleId:selectedSubtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+  // #endregion
   selectedToken = token;
   selectedTokenIndex = index;
   selectedSubtitleId = subtitleId;
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:setSelectedToken',message:'BEFORE_RENDER_CALLS',data:{token,index,subtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+  // #endregion
+  renderSubArea();
   renderTokenArea();
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:setSelectedToken',message:'AFTER_RENDER_CALLS',data:{token,index,subtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+  // #endregion
 }
 
 /**
@@ -124,19 +144,200 @@ function debugElementStyles(element: HTMLElement, name: string): void {
   }
 }
 
+
+/**
+ * Mount subtitle - sets state/data correctly from cache/DB
+ * This is the ONLY place where subtitle state is set for display
+ * SubArea component reactively reads this state and applies Tailwind classes
+ */
+async function mountSubtitle(
+  subtitle: SubtitleTh | null,
+  mode: DisplayMode,
+  video: HTMLVideoElement | null
+): Promise<void> {
+  // #region agent log
+  const stackTrace = new Error().stack;
+  const callerLocation = stackTrace?.split('\n')[2]?.trim() || 'unknown';
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:mountSubtitle',message:'MOUNT_SUBTITLE_CALLED',data:{callerLocation,subtitleId:subtitle?.id,displayMode:mode},timestamp:Date.now(),runId:'run1',hypothesisId:'H2'})}).catch(()=>{});
+  // #endregion
+
+  if (!subtitle) {
+    currentSubtitle = null;
+    displayText = '';
+    renderSubArea();
+    return;
+  }
+
+  // CRITICAL: Cache is source of truth - ALWAYS get subtitle from cache before mount
+  const subtitleFromCache = subtitle.id ? getSubtitleById(subtitle.id) : null;
+  const subtitleToUse = subtitleFromCache || subtitle;
+  
+  // Reset selected token state when subtitle changes
+  if (currentSubtitle?.id !== subtitleToUse.id) {
+    selectedToken = null;
+    selectedTokenIndex = null;
+    selectedSubtitleId = null;
+    // Clear TokenArea display when subtitle changes
+    renderTokenArea();
+  }
+  
+  // #region agent log - Log token meaning_id states BEFORE mount (this is the state being set)
+  const tokenMeaningIds = subtitleToUse?.tokens_th?.tokens?.map((t, idx) => {
+    if (typeof t === 'object' && t !== null && 'meaning_id' in t) {
+      return { 
+        index: idx, 
+        meaningId: (t as any).meaning_id?.toString() || null,
+        tokenText: typeof t === 'object' && 't' in t ? t.t : String(t)
+      };
+    }
+    return { 
+      index: idx, 
+      meaningId: null,
+      tokenText: typeof t === 'string' ? t : (typeof t === 'object' && 't' in t ? t.t : String(t))
+    };
+  }) || [];
+  const meaningIdCount = tokenMeaningIds.filter(t => t.meaningId !== null).length;
+  const tokensWithMeaning = tokenMeaningIds.filter(t => t.meaningId !== null);
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:mountSubtitle',message:'MOUNT_SUBTITLE - State being set',data:{subtitleId:subtitleToUse.id,fromCache:!!subtitleFromCache,tokenCount:tokenMeaningIds.length,meaningIdCount,tokensWithMeaning,allTokenMeaningIds:tokenMeaningIds},timestamp:Date.now(),runId:'run1',hypothesisId:'MOUNT'})}).catch(()=>{});
+  // #endregion
+
+  // Set currentSubtitle (this is the state SubArea will read)
+  currentSubtitle = subtitleToUse;
+  setMostRecentlyDisplayedSubtitleId(subtitleToUse.id);
+
+  // Extract tokens array - this is what SubArea will read reactively
+  const tokens = subtitleToUse?.tokens_th?.tokens;
+  
+  // #region agent log - Verify tokens array has meaning_id values set correctly
+  const extractedTokenMeaningIds = tokens?.map((t, idx) => {
+    if (typeof t === 'object' && t !== null && 'meaning_id' in t) {
+      return { index: idx, meaningId: (t as any).meaning_id?.toString() || null };
+    }
+    return { index: idx, meaningId: null };
+  }) || [];
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:mountSubtitle',message:'MOUNT_SUBTITLE - Tokens array extracted',data:{subtitleId:subtitleToUse.id,tokenCount:tokens?.length || 0,extractedTokenMeaningIds},timestamp:Date.now(),runId:'run1',hypothesisId:'MOUNT'})}).catch(()=>{});
+  // #endregion
+
+
+  // Handle auto-unpause logic - unpause if tokens are now visible for the first time
+  if (video && !hasTokensShown && subtitleToUse?.tokens_th?.tokens && subtitleToUse.tokens_th.tokens.length > 0) {
+    unpause(video);
+    hasTokensShown = true;
+  }
+  
+  // Track that tokens have been shown
+  if (subtitleToUse?.tokens_th?.tokens && subtitleToUse.tokens_th.tokens.length > 0) {
+    hasTokensShown = true;
+  }
+
+  // Set displayText for non-tokens modes (tokens mode passes tokens array directly to SubArea)
+  if (mode === 'thai') {
+    displayText = subtitleToUse.thai || '';
+  } else if (mode === 'phonetics') {
+    // For phonetics, we'd need async lookup - for now just use tokens text
+    // This can be enhanced later if needed
+    if (tokens && Array.isArray(tokens)) {
+      displayText = tokens.map(t => typeof t === 'string' ? t : t.t).join(' ');
+    } else {
+      displayText = '';
+    }
+  } else {
+    // tokens mode - displayText not used, tokens passed directly
+    displayText = '';
+  }
+
+  // #region agent log - Mount complete
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:mountSubtitle',message:'MOUNT_SUBTITLE - Complete',data:{subtitleId:subtitleToUse.id,displayMode:mode,displayTextLength:displayText.length,tokenCount:tokens?.length || 0},timestamp:Date.now(),runId:'run1',hypothesisId:'MOUNT'})}).catch(()=>{});
+  // #endregion
+
+  // Render SubArea - it will read state and apply Tailwind classes reactively
+  renderSubArea();
+}
+
 /**
  * Render SubArea component with current state
+ * CRITICAL: currentSubtitle should already be refreshed from cache at assignment points
+ * This function should receive subtitle with correct meaning_id values from the start
  */
 function renderSubArea(): void {
-  // Extract tokens array when in tokens mode
-  const tokens = displayMode === 'tokens' && currentSubtitle?.tokens_th && 
-    typeof currentSubtitle.tokens_th === 'object' && 'tokens' in currentSubtitle.tokens_th
-    ? (currentSubtitle.tokens_th as any).tokens
-    : undefined;
+  // #region agent log
+  const stackTrace = new Error().stack;
+  const callerLocation = stackTrace?.split('\n')[2]?.trim() || 'unknown';
+  const tokenMeaningIds = currentSubtitle?.tokens_th?.tokens?.map((t, idx) => {
+    if (typeof t === 'object' && t !== null && 'meaning_id' in t) {
+      return { index: idx, meaningId: (t as any).meaning_id?.toString() || null };
+    }
+    return { index: idx, meaningId: null };
+  }) || [];
+  // Verify cache matches - if not, log warning (should not happen after fix)
+  const cacheSubtitle = currentSubtitle?.id ? getSubtitleById(currentSubtitle.id) : null;
+  const cacheTokenMeaningIds = cacheSubtitle?.tokens_th?.tokens?.map((t, idx) => {
+    if (typeof t === 'object' && t !== null && 'meaning_id' in t) {
+      return { index: idx, meaningId: (t as any).meaning_id?.toString() || null };
+    }
+    return { index: idx, meaningId: null };
+  }) || [];
+  const isStale = cacheSubtitle && JSON.stringify(tokenMeaningIds) !== JSON.stringify(cacheTokenMeaningIds);
+  if (isStale) {
+    // Refresh from cache if stale (should not happen after fix, but safety net)
+    currentSubtitle = cacheSubtitle;
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:renderSubArea',message:'STALE_SUBTITLE_DETECTED_REFRESHED',data:{callerLocation,subtitleId:currentSubtitle?.id,wasStale:true},timestamp:Date.now(),runId:'run1',hypothesisId:'H2'})}).catch(()=>{});
+  }
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:renderSubArea',message:'RENDER_SUBAREA_CALLED',data:{callerLocation,subtitleId:currentSubtitle?.id,tokenCount:currentSubtitle?.tokens_th?.tokens?.length || 0,tokenMeaningIds:cacheSubtitle ? cacheTokenMeaningIds : tokenMeaningIds,displayMode,wasStale:isStale},timestamp:Date.now(),runId:'run1',hypothesisId:'H3'})}).catch(()=>{});
+  // #endregion
   
-  const handleTokenClick = (token: string | { t: string; meaning_id?: bigint }, index: number): void => {
-    const tokenText = typeof token === 'string' ? token : token.t;
-    setSelectedToken(tokenText, index, currentSubtitle?.id || null);
+  // Extract tokens array when in tokens mode
+  const tokens = displayMode === 'tokens' ? currentSubtitle?.tokens_th?.tokens : undefined;
+  
+  // #region agent log
+  const extractedTokenMeaningIds = tokens?.map((t, idx) => {
+    if (typeof t === 'object' && t !== null && 'meaning_id' in t) {
+      return { index: idx, meaningId: (t as any).meaning_id?.toString() || null };
+    }
+    return { index: idx, meaningId: null };
+  }) || [];
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:renderSubArea',message:'TOKENS_EXTRACTED_FOR_RENDER',data:{subtitleId:currentSubtitle?.id,tokenCount:tokens?.length || 0,extractedTokenMeaningIds},timestamp:Date.now(),runId:'run1',hypothesisId:'H2'})}).catch(()=>{});
+  // #endregion
+  
+  // Auto-select first untagged token if no selection exists for current subtitle
+  // Only auto-select on initial render, not when user manually selects a token
+  if (tokens && tokens.length > 0 && displayMode === 'tokens') {
+    // Check if we need to auto-select first untagged token (only on initial render)
+    const needsAutoSelect = selectedTokenIndex === null || 
+                            selectedSubtitleId !== currentSubtitle?.id;
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:renderSubArea',message:'AUTO_SELECT_CHECK',data:{selectedTokenIndex,selectedSubtitleId,currentSubtitleId:currentSubtitle?.id,needsAutoSelect},timestamp:Date.now(),runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+    // #endregion
+    
+    if (needsAutoSelect) {
+      // Find first token without meaning_id
+      const firstUntaggedIndex = tokens.findIndex(token => {
+        const hasMeaning = typeof token === 'object' && token !== null && 'meaning_id' in token
+          ? token.meaning_id !== undefined && token.meaning_id !== null
+          : false;
+        return !hasMeaning;
+      });
+      
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:renderSubArea',message:'FIRST_UNTAGGED_FOUND',data:{firstUntaggedIndex},timestamp:Date.now(),runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+      // #endregion
+      
+      if (firstUntaggedIndex !== -1) {
+        const token = tokens[firstUntaggedIndex];
+        const tokenText = typeof token === 'string' ? token : token.t;
+        setSelectedToken(tokenText, firstUntaggedIndex, currentSubtitle?.id || null);
+        // setSelectedToken already calls renderSubArea() and renderTokenArea(), so we can return early
+        return;
+      }
+    }
+  }
+  
+  const handleTokenClick = (index: number): void => {
+    if (tokens && tokens[index]) {
+      const tokenText = typeof tokens[index] === 'string' ? tokens[index] : tokens[index].t;
+      setSelectedToken(tokenText, index, currentSubtitle?.id || null);
+    }
   };
   
   if (subtitleDisplayAreaRoot && bottomRect) {
@@ -146,10 +347,11 @@ function renderSubArea(): void {
         displayMode,
         onDisplayModeChange: (mode: DisplayMode) => {
           displayMode = mode;
-          updateSubtitleDisplay();
+          // Just re-render - SubArea reads same state/data and applies different Tailwind classes based on displayMode
+          renderSubArea();
         },
         currentSubtitle,
-        tokens,
+        tokens, // Pass tokens directly
         onTokenClick: handleTokenClick,
         selectedTokenIndex,
       })
@@ -162,76 +364,105 @@ function renderSubArea(): void {
  */
 async function handleMeaningSelect(tokenIndex: number, meaningId: bigint): Promise<void> {
   // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelect',message:'Function entry',data:{tokenIndex,meaningId:meaningId.toString(),selectedSubtitleId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MEANING_SELECT'})}).catch(()=>{});
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelect',message:'HOTKEY_MEANING_SELECT_ENTRY',data:{tokenIndex,meaningId:meaningId.toString(),selectedSubtitleId,hasHandler:!!(window as any).__tokenAreaSelectMeaning,isEditingMode},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
   // #endregion
   
+  // TokenArea component handles the save internally
+  // Call the component's internal handler if available (for hotkeys)
+  if ((window as any).__tokenAreaSelectMeaning) {
+    await (window as any).__tokenAreaSelectMeaning(tokenIndex, meaningId);
+  } else {
+    console.warn('[Content] TokenArea meaning selection handler not available');
+  }
+  
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelect',message:'AFTER_TOKENAREA_SAVE',data:{tokenIndex,meaningId:meaningId.toString(),selectedSubtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
+  
+  // Refresh current subtitle from cache (TokenArea already updated it)
   if (!selectedSubtitleId) {
     // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelect',message:'Early return - no subtitle ID',data:{tokenIndex,meaningId:meaningId.toString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MEANING_SELECT'})}).catch(()=>{});
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelect',message:'EARLY_RETURN_NO_SUBTITLE_ID',data:{tokenIndex},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
     // #endregion
-    console.error('[Content] Cannot save meaning selection: no subtitle ID');
     return;
   }
   
-  try {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelect',message:'Calling saveTokenMeaningSelection',data:{subtitleId:selectedSubtitleId,tokenIndex,meaningId:meaningId.toString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MEANING_SELECT'})}).catch(()=>{});
-    // #endregion
-    await saveTokenMeaningSelection(selectedSubtitleId, tokenIndex, meaningId);
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelect',message:'saveTokenMeaningSelection completed',data:{subtitleId:selectedSubtitleId,tokenIndex,meaningId:meaningId.toString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MEANING_SELECT'})}).catch(()=>{});
-    // #endregion
+  const subtitleFromCache = getSubtitleById(selectedSubtitleId);
+  // #region agent log
+  const cacheTokenMeaningId = subtitleFromCache?.tokens_th?.tokens?.[tokenIndex] && typeof subtitleFromCache.tokens_th.tokens[tokenIndex] === 'object' && 'meaning_id' in subtitleFromCache.tokens_th.tokens[tokenIndex] ? (subtitleFromCache.tokens_th.tokens[tokenIndex] as any).meaning_id?.toString() : null;
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelect',message:'CACHE_CHECK_AFTER_SAVE',data:{tokenIndex,meaningId:meaningId.toString(),selectedSubtitleId,hasSubtitleFromCache:!!subtitleFromCache,cacheTokenMeaningId},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
+  
+  if (subtitleFromCache) {
+    currentSubtitle = subtitleFromCache;
+    await mountSubtitle(currentSubtitle, displayMode, videoElement);
+    renderTokenArea();
     
-    // Update local subtitle cache
-    const subtitleIndex = subtitles.findIndex(sub => sub.id === selectedSubtitleId);
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelect',message:'Updating local cache',data:{subtitleIndex,hasTokens:subtitleIndex !== -1 && !!subtitles[subtitleIndex]?.tokens_th?.tokens},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MEANING_SELECT'})}).catch(()=>{});
-    // #endregion
-    if (subtitleIndex !== -1) {
-      const subtitle = subtitles[subtitleIndex];
-      if (subtitle.tokens_th && subtitle.tokens_th.tokens) {
-        const normalizedTokens = normalizeTokens(subtitle.tokens_th.tokens);
-        normalizedTokens[tokenIndex] = {
-          ...normalizedTokens[tokenIndex],
-          meaning_id: meaningId,
-        };
-        subtitles[subtitleIndex] = {
-          ...subtitle,
-          tokens_th: {
-            tokens: normalizedTokens,
-          },
-        };
-        
-        // Update current subtitle if it's the one being edited
-        if (currentSubtitle?.id === selectedSubtitleId) {
-          currentSubtitle = subtitles[subtitleIndex];
-        }
-        
-        // Update cache
-        setSubtitleCache(subtitles);
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelect',message:'Cache updated, calling render functions',data:{subtitleId:selectedSubtitleId,currentSubtitleId:currentSubtitle?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MEANING_SELECT'})}).catch(()=>{});
-        // #endregion
-      }
+    // Auto-advance to next untagged token if in editing mode
+    if (isEditingMode) {
+      navigateToNextUntaggedToken();
     }
-    
+  }
+}
+
+async function handleMeaningSelectComplete(): Promise<void> {
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelectComplete',message:'MEANING_SELECT_COMPLETE_ENTRY',data:{selectedSubtitleId,selectedTokenIndex,isEditingMode},timestamp:Date.now(),runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+  // #endregion
+  
+  // Called after TokenArea completes meaning selection
+  // Refresh current subtitle from cache
+  if (!selectedSubtitleId) {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelectComplete',message:'EARLY_RETURN_NO_SUBTITLE_ID',data:{},timestamp:Date.now(),runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
+    return;
+  }
+  
+  const subtitleFromCache = getSubtitleById(selectedSubtitleId);
+  // #region agent log
+  const cacheTokenMeaningId = subtitleFromCache?.tokens_th?.tokens?.[selectedTokenIndex ?? -1] && typeof subtitleFromCache.tokens_th.tokens[selectedTokenIndex ?? -1] === 'object' && 'meaning_id' in subtitleFromCache.tokens_th.tokens[selectedTokenIndex ?? -1] ? (subtitleFromCache.tokens_th.tokens[selectedTokenIndex ?? -1] as any).meaning_id?.toString() : null;
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelectComplete',message:'CACHE_CHECK_BEFORE_RENDER',data:{selectedSubtitleId,selectedTokenIndex,hasSubtitleFromCache:!!subtitleFromCache,cacheTokenMeaningId},timestamp:Date.now(),runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+  // #endregion
+  
+  if (subtitleFromCache) {
+    // Update currentSubtitle to reflect the new meaning_id
+    currentSubtitle = subtitleFromCache;
     // Re-render both areas to show updated state
     renderSubArea();
     renderTokenArea();
     
-    // Auto-advance to next untagged token (or unpause if all tagged)
-    if (isEditingMode && currentSubtitle?.id === selectedSubtitleId) {
-      navigateToNextUntaggedToken();
+    // Check if current selected token now has a meaning_id
+    // If so, auto-advance to next untagged token
+    if (selectedTokenIndex !== null && selectedTokenIndex !== undefined) {
+      const tokens = subtitleFromCache.tokens_th?.tokens;
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelectComplete',message:'CHECKING_CURRENT_TOKEN_FOR_MEANING',data:{selectedTokenIndex,hasTokens:!!tokens,tokenCount:tokens?.length || 0},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+      // #endregion
+      if (tokens && selectedTokenIndex < tokens.length) {
+        const token = tokens[selectedTokenIndex];
+        const hasMeaning = typeof token === 'object' && token !== null && 'meaning_id' in token
+          ? token.meaning_id !== undefined && token.meaning_id !== null
+          : false;
+        
+        // #region agent log
+        const tokenMeaningId = typeof token === 'object' && token !== null && 'meaning_id' in token ? (token as any).meaning_id?.toString() : null;
+        fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelectComplete',message:'CURRENT_TOKEN_MEANING_CHECK',data:{selectedTokenIndex,tokenMeaningId,hasMeaning},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+        // #endregion
+        
+        if (hasMeaning) {
+          // #region agent log
+          fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelectComplete',message:'CALLING_NAVIGATE_NEXT_UNTAGGED',data:{selectedTokenIndex},timestamp:Date.now(),runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+          // #endregion
+          // Current token now has meaning_id, move to next untagged token
+          navigateToNextUntaggedToken();
+        } else {
+          // #region agent log
+          fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelectComplete',message:'SKIPPING_AUTO_ADVANCE_NO_MEANING',data:{selectedTokenIndex},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+          // #endregion
+        }
+      }
     }
-    
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelect',message:'Function exit - success',data:{subtitleId:selectedSubtitleId,tokenIndex,meaningId:meaningId.toString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MEANING_SELECT'})}).catch(()=>{});
-    // #endregion
-  } catch (error) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelect',message:'Function exit - error',data:{error:error instanceof Error ? error.message : String(error),tokenIndex,meaningId:meaningId.toString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MEANING_SELECT'})}).catch(()=>{});
-    // #endregion
-    console.error('[Content] Failed to save meaning selection:', error);
   }
 }
 
@@ -244,97 +475,90 @@ function handleMeaningsFetched(meanings: MeaningTh[]): void {
   // #endregion
   
   if (selectedSubtitleId !== null && selectedTokenIndex !== null) {
-    const key = `${selectedSubtitleId}_${selectedTokenIndex}`;
-    meaningsByToken.set(key, meanings);
+    setMeaningsForToken(meaningsByToken, selectedSubtitleId, selectedTokenIndex, meanings);
     // #region agent log
+    const key = `${selectedSubtitleId}_${selectedTokenIndex}`;
     fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningsFetched',message:'Meanings stored',data:{key,meaningCount:meanings.length,mapSize:meaningsByToken.size},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'HOTKEY'})}).catch(()=>{});
     // #endregion
     
-    // Auto-select first meaning if flag is set
+    // Auto-select first meaning if flag is set and meanings were just fetched (not cached before)
     if (shouldAutoSelectFirstMeaning && meanings.length > 0) {
       shouldAutoSelectFirstMeaning = false;
       const firstMeaning = meanings[0];
       // #region agent log
       fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningsFetched',message:'Auto-selecting first meaning',data:{tokenIndex:selectedTokenIndex,meaningId:firstMeaning.id.toString(),meaningCount:meanings.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_SELECT'})}).catch(()=>{});
       // #endregion
-      handleMeaningSelect(selectedTokenIndex, firstMeaning.id);
+      
+      // Auto-select first meaning - trigger through TokenArea
+      if (selectedTokenIndex !== null && selectedTokenIndex !== undefined && (window as any).__tokenAreaSelectMeaning) {
+        (window as any).__tokenAreaSelectMeaning(selectedTokenIndex, firstMeaning.id).catch((error: Error) => {
+          console.error('[Content] Failed to auto-select meaning:', error);
+        });
+      }
     }
   }
 }
 
-/**
- * Handle number key press for meaning selection
- */
-function handleNumberKeySelection(meaningIndex: number): void {
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleNumberKeySelection',message:'Function entry',data:{meaningIndex,selectedSubtitleId,selectedTokenIndex,isEditingMode},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'HOTKEY'})}).catch(()=>{});
-  // #endregion
-  
-  // Only handle if we have a selected token and are in editing mode
-  if (selectedSubtitleId === null || selectedTokenIndex === null || !isEditingMode) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleNumberKeySelection',message:'Early return - invalid state',data:{meaningIndex,selectedSubtitleId,selectedTokenIndex,isEditingMode},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'HOTKEY'})}).catch(()=>{});
-    // #endregion
-    return;
-  }
-  
-  // Look up meanings for current token
-  const key = `${selectedSubtitleId}_${selectedTokenIndex}`;
-  const meanings = meaningsByToken.get(key);
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleNumberKeySelection',message:'Looking up meanings',data:{meaningIndex,key,hasMeanings:!!meanings,meaningCount:meanings?.length || 0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'HOTKEY'})}).catch(()=>{});
-  // #endregion
-  
-  if (!meanings || meanings.length === 0) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleNumberKeySelection',message:'No meanings available',data:{meaningIndex,key},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'HOTKEY'})}).catch(()=>{});
-    // #endregion
-    return; // No meanings available
-  }
-  
-  // Check if index is valid
-  // meaningIndex is 0-based (0 = first meaning, 1 = second meaning, etc.)
-  if (meaningIndex < 0 || meaningIndex >= meanings.length) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleNumberKeySelection',message:'Invalid index',data:{meaningIndex,meaningCount:meanings.length,validRange:`0-${meanings.length - 1}`},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'HOTKEY'})}).catch(()=>{});
-    // #endregion
-    return; // Invalid index
-  }
-  
-  // Select the meaning at the given index
-  const selectedMeaning = meanings[meaningIndex];
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleNumberKeySelection',message:'Calling handleMeaningSelect',data:{meaningIndex,meaningId:selectedMeaning.id.toString(),tokenIndex:selectedTokenIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'HOTKEY'})}).catch(()=>{});
-  // #endregion
-  handleMeaningSelect(selectedTokenIndex, selectedMeaning.id);
-}
 
 /**
  * Render TokenArea component
+ * Extracts meaning_id from the selected token and passes it to TokenArea
+ * so TokenArea knows which meaning is currently selected for highlighting
  */
 function renderTokenArea(): void {
   if (additionalInformationAreaRoot && rightRect) {
-    // Get selected meaning ID from current subtitle if available
-    let selectedMeaningId: bigint | null = null;
-    if (currentSubtitle?.tokens_th?.tokens && 
-        selectedTokenIndex !== null && 
-        selectedTokenIndex !== undefined &&
-        selectedTokenIndex >= 0 &&
-        selectedTokenIndex < currentSubtitle.tokens_th.tokens.length) {
-      const token = currentSubtitle.tokens_th.tokens[selectedTokenIndex];
-      const meaningId = getTokenMeaningId(token);
-      if (meaningId !== undefined) {
-        selectedMeaningId = meaningId;
+    // Use subtitle from cache that matches selectedSubtitleId
+    // This ensures we get the latest updated subtitle with meaning_id after selection
+    const subtitleForToken = selectedSubtitleId ? getSubtitleById(selectedSubtitleId) : null;
+    
+    // Extract token data directly - no helper function needed
+    let tokenText: string | null = selectedToken;
+    let meaningId: bigint | null = null;
+    
+    if (subtitleForToken?.tokens_th?.tokens && selectedTokenIndex !== null && selectedTokenIndex !== undefined && selectedTokenIndex >= 0) {
+      const tokens = subtitleForToken.tokens_th.tokens;
+      if (selectedTokenIndex < tokens.length) {
+        const token = tokens[selectedTokenIndex];
+        tokenText = typeof token === 'string' ? token : token.t;
+        // Extract meaning_id from token - TokenArea uses this to highlight the matching meaning
+        // TokenArea is purely reactive - it receives meaning_id from the token, doesn't ask for it
+        if (typeof token === 'object' && token !== null && 'meaning_id' in token) {
+          const extractedMeaningId = token.meaning_id;
+          // #region agent log
+          const meaningIdType = typeof extractedMeaningId;
+          const meaningIdValue = extractedMeaningId?.toString() || null;
+          fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:renderTokenArea',message:'EXTRACTING_MEANING_ID',data:{selectedTokenIndex,tokenText,meaningIdType,meaningIdValue,hasMeaningId:extractedMeaningId !== undefined && extractedMeaningId !== null},timestamp:Date.now(),runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+          // #endregion
+          if (extractedMeaningId !== undefined && extractedMeaningId !== null) {
+            // Convert to bigint to match meaning.id type (handles both number and bigint from DB)
+            // This ensures the comparison meaning.id === selectedMeaningId works correctly
+            meaningId = typeof extractedMeaningId === 'bigint' 
+              ? extractedMeaningId 
+              : BigInt(extractedMeaningId);
+            // #region agent log
+            fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:renderTokenArea',message:'CONVERTED_TO_BIGINT',data:{selectedTokenIndex,originalType:meaningIdType,convertedType:typeof meaningId,meaningIdValue:meaningId?.toString() || null},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+            // #endregion
+          }
+        }
       }
     }
     
+    // #region agent log
+    const meaningIdType = typeof meaningId;
+    const meaningIdValue = meaningId?.toString() || null;
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:renderTokenArea',message:'RENDER_TOKENAREA_EXTRACTED_MEANING_ID',data:{selectedSubtitleId,selectedTokenIndex,tokenText,meaningIdType,meaningIdValue,hasSubtitleForToken:!!subtitleForToken},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    
     additionalInformationAreaRoot.render(
       React.createElement(TokenArea, {
-        selectedToken,
+        selectedToken: tokenText,
         subtitleId: selectedSubtitleId,
         tokenIndex: selectedTokenIndex,
-        selectedMeaningId,
-        onMeaningSelect: handleMeaningSelect,
+        selectedMeaningId: meaningId, // Pass meaning_id so TokenArea knows which meaning is selected
+        subtitles: subtitles,
+        currentSubtitle: currentSubtitle,
+        onMeaningSelect: handleMeaningSelect, // For external calls (hotkeys)
+        onMeaningSelectComplete: handleMeaningSelectComplete, // Called after save completes
         onMeaningsFetched: handleMeaningsFetched,
       })
     );
@@ -342,349 +566,101 @@ function renderTokenArea(): void {
 }
 
 /**
- * Find current subtitle based on video time
- * Subtitles persist until the next subtitle's start_sec_th is reached
- * Only checks start_sec_th, not end_sec_th (for persistence)
+ * Check subtitle contract - determines if subtitle should pause at end_sec_th
+ * Simplified contract: pause at end_sec_th if subtitle has tokens
+ * 
+ * @param subtitle - Subtitle to check (from cache)
+ * @param currentTime - Current playback time
+ * @returns true if video should pause, false otherwise
  */
-function findCurrentSubtitle(currentTime: number): SubtitleTh | null {
-  // Find the most recent subtitle whose start time we've passed
-  // Subtitles persist until the next one starts
-  let found: SubtitleTh | null = null;
-  for (const sub of subtitles) {
-    const start = sub.start_sec_th ?? 0;
-    if (currentTime >= start) {
-      found = sub;
-    } else {
-      break; // Subtitles are sorted by start_sec_th
-    }
+function shouldPauseAtEndTime(subtitle: SubtitleTh | null, currentTime: number): boolean {
+  if (!subtitle) {
+    return false;
   }
-  return found;
+  
+  // CRITICAL: Cache is source of truth - refresh subtitle from cache
+  const subtitleFromCache = subtitle.id ? getSubtitleById(subtitle.id) : null;
+  const subtitleToUse = subtitleFromCache || subtitle;
+  
+  const endTime = subtitleToUse.end_sec_th;
+  if (endTime === undefined || endTime === null) {
+    return false; // No end time defined
+  }
+  
+  // Check if we've reached end time
+  if (currentTime < endTime) {
+    return false; // Not at end time yet
+  }
+  
+  // Check if subtitle has tokens
+  const tokens = subtitleToUse.tokens_th?.tokens;
+  if (!tokens || tokens.length === 0) {
+    return false; // No tokens, no pause needed
+  }
+  
+  // Pause at end_sec_th if subtitle has tokens
+  return true;
 }
+
 
 /**
  * Update subtitle display text based on current subtitle and display mode
  */
-async function updateSubtitleDisplay(): Promise<void> {
-  // Cancel previous async operation
-  if (updateAbortController) {
-    updateAbortController.abort();
-  }
-  updateAbortController = new AbortController();
-  
-  if (!currentSubtitle) {
-    displayText = '';
-    renderSubArea();
-    return;
-  }
-  
-  // Track most recently displayed subtitle whenever a subtitle is shown
-  setMostRecentlyDisplayedSubtitleId(currentSubtitle.id);
-  
-  // Check if tokens are now visible for the first time
-  const hasTokens = currentSubtitle.tokens_th?.tokens && 
-    Array.isArray(currentSubtitle.tokens_th.tokens) && 
-    currentSubtitle.tokens_th.tokens.length > 0;
-  
-  if (!hasTokensShown && hasTokens && videoElement && videoElement.paused) {
-    // Tokens first appeared, auto-unpause
-    try {
-      videoElement.play();
-      hasTokensShown = true;
-    } catch (error) {
-      console.warn('[SubtitleDisplay] Could not unpause video when tokens appeared:', error);
-    }
-  }
-  
-  if (hasTokens) {
-    hasTokensShown = true;
-  }
-  
-  try {
-    const formattedText = await formatSubtitleForDisplay(currentSubtitle, displayMode);
-    if (!updateAbortController.signal.aborted) {
-      displayText = formattedText;
-      renderSubArea();
-    }
-  } catch (error) {
-    if (!updateAbortController.signal.aborted) {
-      displayText = currentSubtitle.thai || '';
-      renderSubArea();
-    }
-  }
-}
 
 /**
  * Find first untagged token index in subtitle
  */
-function findFirstUntaggedTokenIndex(subtitle: SubtitleTh): number | null {
-  if (!subtitle.tokens_th?.tokens) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:findFirstUntaggedTokenIndex',message:'No tokens found',data:{subtitleId:subtitle.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_SKIP'})}).catch(()=>{});
-    // #endregion
-    return null;
-  }
-  const tokens = subtitle.tokens_th.tokens;
-  
-  // Log token states for debugging
-  const tokenStates = tokens.map((token, idx) => ({
-    index: idx,
-    text: typeof token === 'string' ? token : token.t,
-    hasMeaning: hasMeaningSelection(token),
-    meaningId: typeof token === 'string' ? null : (token.meaning_id?.toString() || null)
-  }));
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:findFirstUntaggedTokenIndex',message:'Checking token states',data:{subtitleId:subtitle.id,tokenCount:tokens.length,tokenStates},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_SKIP'})}).catch(()=>{});
-  // #endregion
-  
-  for (let i = 0; i < tokens.length; i++) {
-    if (!hasMeaningSelection(tokens[i])) {
-      // #region agent log
-      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:findFirstUntaggedTokenIndex',message:'Found first untagged token',data:{subtitleId:subtitle.id,foundIndex:i,tokenText:typeof tokens[i] === 'string' ? tokens[i] : tokens[i].t,skippedCount:i},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_SKIP'})}).catch(()=>{});
-      // #endregion
-      return i;
-    }
-  }
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:findFirstUntaggedTokenIndex',message:'All tokens tagged',data:{subtitleId:subtitle.id,tokenCount:tokens.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_SKIP'})}).catch(()=>{});
-  // #endregion
-  return null; // All tokens are tagged
-}
+// findFirstUntaggedTokenIndex moved to subtitleTokenNavigation.ts
 
 /**
  * Find next untagged token index after startIndex
  */
-function findNextUntaggedTokenIndex(subtitle: SubtitleTh, startIndex: number): number | null {
-  if (!subtitle.tokens_th?.tokens) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:findNextUntaggedTokenIndex',message:'No tokens found',data:{subtitleId:subtitle.id,startIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_SKIP'})}).catch(()=>{});
-    // #endregion
-    return null;
-  }
-  const tokens = subtitle.tokens_th.tokens;
-  
-  // Log token states for debugging
-  const tokenStates = tokens.map((token, idx) => ({
-    index: idx,
-    text: typeof token === 'string' ? token : token.t,
-    hasMeaning: hasMeaningSelection(token),
-    meaningId: typeof token === 'string' ? null : (token.meaning_id?.toString() || null)
-  }));
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:findNextUntaggedTokenIndex',message:'Checking token states',data:{subtitleId:subtitle.id,startIndex,tokenCount:tokens.length,tokenStates},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_SKIP'})}).catch(()=>{});
-  // #endregion
-  
-  // Check from startIndex + 1 to end
-  for (let i = startIndex + 1; i < tokens.length; i++) {
-    if (!hasMeaningSelection(tokens[i])) {
-      // #region agent log
-      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:findNextUntaggedTokenIndex',message:'Found next untagged token (forward)',data:{subtitleId:subtitle.id,startIndex,foundIndex:i,tokenText:typeof tokens[i] === 'string' ? tokens[i] : tokens[i].t,skippedCount:i - startIndex - 1},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_SKIP'})}).catch(()=>{});
-      // #endregion
-      return i;
-    }
-  }
-  // Wrap around: check from beginning to startIndex
-  for (let i = 0; i < startIndex; i++) {
-    if (!hasMeaningSelection(tokens[i])) {
-      // #region agent log
-      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:findNextUntaggedTokenIndex',message:'Found next untagged token (wrapped)',data:{subtitleId:subtitle.id,startIndex,foundIndex:i,tokenText:typeof tokens[i] === 'string' ? tokens[i] : tokens[i].t},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_SKIP'})}).catch(()=>{});
-      // #endregion
-      return i;
-    }
-  }
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:findNextUntaggedTokenIndex',message:'All tokens tagged',data:{subtitleId:subtitle.id,startIndex,tokenCount:tokens.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_SKIP'})}).catch(()=>{});
-  // #endregion
-  return null; // All tokens are tagged
-}
+// findNextUntaggedTokenIndex moved to subtitleTokenNavigation.ts
 
 /**
  * Check if all tokens in subtitle are tagged
  */
-function areAllTokensTagged(subtitle: SubtitleTh): boolean {
-  if (!subtitle.tokens_th?.tokens || subtitle.tokens_th.tokens.length === 0) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:areAllTokensTagged',message:'No tokens - returning true',data:{subtitleId:subtitle.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_SKIP'})}).catch(()=>{});
-    // #endregion
-    return true; // No tokens means "all tagged" (nothing to tag)
-  }
-  const tokens = subtitle.tokens_th.tokens;
-  const allTagged = tokens.every(token => hasMeaningSelection(token));
-  
-  // Log token states
-  const taggedCount = tokens.filter(token => hasMeaningSelection(token)).length;
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:areAllTokensTagged',message:'Checked all tokens',data:{subtitleId:subtitle.id,tokenCount:tokens.length,taggedCount,untaggedCount:tokens.length - taggedCount,allTagged},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_SKIP'})}).catch(()=>{});
-  // #endregion
-  
-  return allTagged;
-}
+// areAllTokensTagged moved to subtitleTokenNavigation.ts
 
-/**
- * Navigate to first untagged token in current subtitle
- */
-function navigateToFirstUntaggedToken(): void {
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToFirstUntaggedToken',message:'Function entry',data:{hasCurrentSubtitle:!!currentSubtitle,subtitleId:currentSubtitle?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_NAV'})}).catch(()=>{});
-  // #endregion
-  
-  if (!currentSubtitle) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToFirstUntaggedToken',message:'Early return - no current subtitle',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_NAV'})}).catch(()=>{});
-    // #endregion
-    return;
-  }
-  
-  const tokenIndex = findFirstUntaggedTokenIndex(currentSubtitle);
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToFirstUntaggedToken',message:'Found untagged token index',data:{tokenIndex,subtitleId:currentSubtitle.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_NAV'})}).catch(()=>{});
-  // #endregion
-  
-  if (tokenIndex === null) {
-    // All tokens are tagged, unpause and clear selection
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToFirstUntaggedToken',message:'All tokens tagged - unpausing',data:{subtitleId:currentSubtitle.id,videoPaused:videoElement?.paused},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_CONTINUE'})}).catch(()=>{});
-    // #endregion
-    if (videoElement && videoElement.paused) {
-      videoElement.play();
-      // #region agent log
-      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToFirstUntaggedToken',message:'Video unpaused',data:{subtitleId:currentSubtitle.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_CONTINUE'})}).catch(()=>{});
-      // #endregion
-    }
-    isEditingMode = false;
-    setSelectedToken(null, null, null);
-    return;
-  }
-  
-  const tokens = currentSubtitle.tokens_th!.tokens;
-  const token = tokens[tokenIndex];
-  const tokenText = typeof token === 'string' ? token : token.t;
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToFirstUntaggedToken',message:'Setting selected token',data:{tokenIndex,tokenText,subtitleId:currentSubtitle.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_NAV'})}).catch(()=>{});
-  // #endregion
-  setSelectedToken(tokenText, tokenIndex, currentSubtitle.id);
-  isEditingMode = true;
-  // Set flag to auto-select first meaning when meanings are fetched
-  shouldAutoSelectFirstMeaning = true;
-  
-  // Check if meanings are already cached and auto-select immediately
-  const key = `${currentSubtitle.id}_${tokenIndex}`;
-  const cachedMeanings = meaningsByToken.get(key);
-  if (cachedMeanings && cachedMeanings.length > 0) {
-    // Meanings already cached, auto-select immediately
-    shouldAutoSelectFirstMeaning = false;
-    const firstMeaning = cachedMeanings[0];
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToFirstUntaggedToken',message:'Auto-selecting first meaning from cache',data:{tokenIndex,meaningId:firstMeaning.id.toString(),meaningCount:cachedMeanings.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_SELECT'})}).catch(()=>{});
-    // #endregion
-    handleMeaningSelect(tokenIndex, firstMeaning.id);
-  }
-  
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToFirstUntaggedToken',message:'Editing mode enabled, auto-select flag set',data:{tokenIndex,isEditingMode,shouldAutoSelectFirstMeaning,hasCachedMeanings:!!cachedMeanings},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_NAV'})}).catch(()=>{});
-  // #endregion
-}
+// navigateToFirstUntaggedToken DELETED - logic moved to content.ts:shouldPauseAtEndTime()
 
 /**
  * Navigate to next untagged token after current selection
  */
 function navigateToNextUntaggedToken(): void {
   // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToNextUntaggedToken',message:'Function entry',data:{hasCurrentSubtitle:!!currentSubtitle,selectedTokenIndex,subtitleId:currentSubtitle?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_NAV'})}).catch(()=>{});
+  const stackTrace = new Error().stack;
+  const callerLocation = stackTrace?.split('\n')[2]?.trim() || 'unknown';
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToNextUntaggedToken',message:'TOKEN_NAV_CALLED',data:{callerLocation,hasCurrentSubtitle:!!currentSubtitle,selectedTokenIndex,subtitleId:currentSubtitle?.id},timestamp:Date.now(),runId:'run1',hypothesisId:'F'})}).catch(()=>{});
   // #endregion
   
-  if (!currentSubtitle || selectedTokenIndex === null) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToNextUntaggedToken',message:'Early return - no subtitle or token index',data:{hasCurrentSubtitle:!!currentSubtitle,selectedTokenIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_NAV'})}).catch(()=>{});
-    // #endregion
-    return;
-  }
+  // Use coordinator to handle navigation workflow
+  const result = handleTokenNavigation(currentSubtitle, selectedTokenIndex, videoElement, null);
   
-  const nextIndex = findNextUntaggedTokenIndex(currentSubtitle, selectedTokenIndex);
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToNextUntaggedToken',message:'Found next untagged token',data:{currentIndex:selectedTokenIndex,nextIndex,subtitleId:currentSubtitle.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_NAV'})}).catch(()=>{});
-  // #endregion
-  
-  if (nextIndex === null) {
-    // All tokens are tagged, unpause and clear selection
+  if (result.shouldClearSelection) {
+    // All tokens tagged - clear selection and exit editing mode
     // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToNextUntaggedToken',message:'All tokens tagged - unpausing',data:{subtitleId:currentSubtitle.id,videoPaused:videoElement?.paused},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_CONTINUE'})}).catch(()=>{});
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToNextUntaggedToken',message:'All tokens tagged - clearing selection',data:{subtitleId:currentSubtitle?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_CONTINUE'})}).catch(()=>{});
     // #endregion
-    if (videoElement && videoElement.paused) {
-      videoElement.play();
-      // #region agent log
-      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToNextUntaggedToken',message:'Video unpaused',data:{subtitleId:currentSubtitle.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_CONTINUE'})}).catch(()=>{});
-      // #endregion
-    }
     isEditingMode = false;
     setSelectedToken(null, null, null);
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToNextUntaggedToken',message:'Editing mode disabled',data:{isEditingMode},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_CONTINUE'})}).catch(()=>{});
-    // #endregion
     return;
   }
   
-  const tokens = currentSubtitle.tokens_th!.tokens;
-  const token = tokens[nextIndex];
-  const tokenText = typeof token === 'string' ? token : token.t;
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToNextUntaggedToken',message:'Setting next selected token',data:{currentIndex:selectedTokenIndex,nextIndex,tokenText,subtitleId:currentSubtitle.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TOKEN_NAV'})}).catch(()=>{});
-  // #endregion
-  setSelectedToken(tokenText, nextIndex, currentSubtitle.id);
+  if (result.nextTokenIndex !== null && result.nextTokenText !== null) {
+    // Navigate to next token
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToNextUntaggedToken',message:'SETTING_NEXT_SELECTED_TOKEN',data:{currentIndex:selectedTokenIndex,nextIndex:result.nextTokenIndex,tokenText:result.nextTokenText,subtitleId:currentSubtitle?.id},timestamp:Date.now(),runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+    // #endregion
+    setSelectedToken(result.nextTokenText, result.nextTokenIndex, currentSubtitle?.id || null);
+  } else {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:navigateToNextUntaggedToken',message:'NO_NEXT_TOKEN_FOUND',data:{currentIndex:selectedTokenIndex,subtitleId:currentSubtitle?.id},timestamp:Date.now(),runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+    // #endregion
+  }
 }
 
-/**
- * Check if video time has crossed end_sec_th and handle pause/navigation
- * Only pauses if not all tokens are tagged
- */
-function checkAndHandleEndTime(currentTime: number): void {
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:checkAndHandleEndTime',message:'Function entry',data:{currentTime,hasCurrentSubtitle:!!currentSubtitle,hasVideoElement:!!videoElement,isEditingMode},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_PAUSE'})}).catch(()=>{});
-  // #endregion
-  
-  if (!currentSubtitle || !videoElement) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:checkAndHandleEndTime',message:'Early return - no subtitle or video',data:{currentTime},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_PAUSE'})}).catch(()=>{});
-    // #endregion
-    return;
-  }
-  
-  const endTime = currentSubtitle.end_sec_th;
-  if (endTime === undefined || endTime === null) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:checkAndHandleEndTime',message:'No end_sec_th',data:{currentTime,subtitleId:currentSubtitle.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_PAUSE'})}).catch(()=>{});
-    // #endregion
-    return;
-  }
-  
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:checkAndHandleEndTime',message:'Checking end time',data:{currentTime,endTime,timeDiff:currentTime - endTime,isPastEnd:currentTime >= endTime,isEditingMode,videoPaused:videoElement.paused},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_PAUSE'})}).catch(()=>{});
-  // #endregion
-  
-  // Check if we've crossed the end time
-  if (currentTime >= endTime && !isEditingMode) {
-    // Only pause if not all tokens are tagged
-    const allTagged = areAllTokensTagged(currentSubtitle);
-    
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:checkAndHandleEndTime',message:'End time crossed - checking if all tokens tagged',data:{currentTime,endTime,subtitleId:currentSubtitle.id,allTagged},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_PAUSE'})}).catch(()=>{});
-    // #endregion
-    
-    if (!allTagged) {
-      // #region agent log
-      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:checkAndHandleEndTime',message:'End time crossed - pausing and navigating',data:{currentTime,endTime,subtitleId:currentSubtitle.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_PAUSE'})}).catch(()=>{});
-      // #endregion
-      // Pause video if not already paused
-      if (!videoElement.paused) {
-        videoElement.pause();
-        // #region agent log
-        fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:checkAndHandleEndTime',message:'Video paused',data:{currentTime,endTime},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_PAUSE'})}).catch(()=>{});
-        // #endregion
-      }
-      // Navigate to first untagged token (which will auto-select first meaning)
-      navigateToFirstUntaggedToken();
-    }
-  }
-}
+// checkAndHandleEndTime DELETED - logic moved to content.ts:shouldPauseAtEndTime()
 
 /**
  * Setup video event listeners for subtitle timing
@@ -704,39 +680,120 @@ function setupVideoEvents(video: HTMLVideoElement): void {
   
   videoElement = video;
   
-  // Pause video by default when first detected
-  if (!hasInitialPause && !video.paused) {
+  // Pause video by default when first detected (force pause regardless of current state)
+  if (!hasInitialPause) {
     try {
       video.pause();
       hasInitialPause = true;
+      console.log('[SubtitleDisplay] Video paused on initial entry');
     } catch (error) {
       console.warn('[SubtitleDisplay] Could not pause video initially:', error);
     }
   }
   
-  const handleTimeUpdate = () => {
-    if (subtitles.length > 0 && video.currentTime !== null && !isNaN(video.currentTime)) {
-      const currentTime = video.currentTime;
-      const newSubtitle = findCurrentSubtitle(currentTime);
-      if (newSubtitle?.id !== currentSubtitle?.id) {
-        currentSubtitle = newSubtitle;
-        // Update current subtitle ID for timeline navigation
-        setCurrentSubtitleId(newSubtitle?.id || null);
-        updateSubtitleDisplay();
-        // Reset editing mode when subtitle changes
-        if (isEditingMode) {
-          isEditingMode = false;
-          setSelectedToken(null, null, null);
+  const handleTimeUpdate = async () => {
+    // Try to get time from Netflix API (with fallback to video.currentTime)
+    const currentTime = await getNetflixCurrentTime();
+    
+    if (currentTime !== null && !isNaN(currentTime)) {
+      // CRITICAL: Check contract for CURRENT subtitle BEFORE finding new subtitle
+      // This ensures we check end_sec_th even if next subtitle starts immediately after
+      if (currentSubtitle && currentSubtitle.end_sec_th !== undefined && currentSubtitle.end_sec_th !== null) {
+        const hasPassedEndTime = currentTime >= currentSubtitle.end_sec_th;
+        if (hasPassedEndTime) {
+          // Check contract for current subtitle
+          const shouldPause = shouldPauseAtEndTime(currentSubtitle, currentTime);
+          if (shouldPause) {
+            // Pause video
+            pause(video);
+            console.log('[SubtitleDisplay] Video paused at end_sec_th for subtitle:', currentSubtitle.id);
+            // #region agent log
+            fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleTimeUpdate',message:'Paused at end_sec_th for current subtitle',data:{subtitleId:currentSubtitle.id,currentTime,endTime:currentSubtitle.end_sec_th},timestamp:Date.now(),runId:'run1',hypothesisId:'PAUSE_LOGIC'})}).catch(()=>{});
+            // #endregion
+            // Keep current subtitle, don't transition yet
+            return;
+          }
         }
       }
-      // Check for end_sec_th pause trigger
-      checkAndHandleEndTime(currentTime);
+      
+      // Find current subtitle based on time using O(1) map lookups
+      // CRITICAL: findCurrentSubtitleByTime returns from cache (source of truth)
+      const newSubtitle = findCurrentSubtitleByTime(currentTime, currentSubtitle);
+      
+      // Detect subtitle change
+      const subtitleChanged = newSubtitle?.id !== currentSubtitle?.id;
+      
+      // Handle subtitle change
+      // CRITICAL: Skip time-based subtitle changes if hotkey navigation just occurred
+      // This prevents handleTimeUpdate from overriding the hotkey-selected subtitle
+      if (subtitleChanged) {
+        if (isHotkeyNavigationActive) {
+          // #region agent log
+          fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleTimeUpdate',message:'SKIPPING_SUBTITLE_CHANGE_HOTKEY_ACTIVE',data:{oldSubtitleId:currentSubtitle?.id,newSubtitleId:newSubtitle?.id,isHotkeyNavigationActive},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_HIGHLIGHT'})}).catch(()=>{});
+          // #endregion
+          // Skip subtitle change - hotkey navigation is controlling the subtitle
+        } else {
+          // #region agent log
+          fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleTimeUpdate',message:'Subtitle change detected',data:{oldSubtitleId:currentSubtitle?.id,newSubtitleId:newSubtitle?.id,isHotkeyNavigationActive},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AUTO_HIGHLIGHT'})}).catch(()=>{});
+          // #endregion
+          const oldSubtitleId = currentSubtitle?.id || null;
+          
+          // CRITICAL: Cache is source of truth - ALWAYS get subtitle from cache
+          // findCurrentSubtitleByTime already returns from cache, but ensure we use cache directly
+          const subtitleFromCache = newSubtitle?.id ? getSubtitleById(newSubtitle.id) : null;
+          const subtitleToUse = subtitleFromCache || newSubtitle;
+          
+          // #region agent log
+          // Log token meaning_id states when subtitle changes - critical for stability verification
+          const newSubtitleTokenMeaningIds = subtitleToUse?.tokens_th?.tokens?.map((t, idx) => {
+            if (typeof t === 'object' && t !== null && 'meaning_id' in t) {
+              return { index: idx, meaningId: (t as any).meaning_id?.toString() || null, tokenText: typeof t === 'object' && 't' in t ? t.t : String(t) };
+            }
+            return { index: idx, meaningId: null, tokenText: typeof t === 'string' ? t : (typeof t === 'object' && 't' in t ? t.t : String(t)) };
+          }) || [];
+          const newMeaningIdCount = newSubtitleTokenMeaningIds.filter(t => t.meaningId !== null).length;
+          fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleTimeUpdate',message:'SUBTITLE_CHANGED_ASSIGNED',data:{oldSubtitleId,newSubtitleId:subtitleToUse?.id,tokenCount:newSubtitleTokenMeaningIds.length,meaningIdCount:newMeaningIdCount,allTokenMeaningIds:newSubtitleTokenMeaningIds,fromCache:!!subtitleFromCache},timestamp:Date.now(),runId:'run1',hypothesisId:'STABILITY'})}).catch(()=>{});
+          // #endregion
+          
+          // #region agent log
+          fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleTimeUpdate',message:'HANDLE_TIME_UPDATE - Before mount',data:{oldSubtitleId,newSubtitleId:subtitleToUse?.id},timestamp:Date.now(),runId:'run1',hypothesisId:'MOUNT'})}).catch(()=>{});
+          // #endregion
+          
+          // Mount subtitle - this sets state/data correctly from cache
+          await mountSubtitle(subtitleToUse, displayMode, video);
+          
+          // Update current subtitle ID for timeline navigation
+          setCurrentSubtitleId(subtitleToUse?.id || null);
+          
+          // Reset editing mode when subtitle changes
+          if (isEditingMode) {
+            isEditingMode = false;
+            setSelectedToken(null, null, null);
+          }
+        }
+      }
+      
+      // Check contract for new subtitle (or current if unchanged)
+      const subtitleToCheck = newSubtitle || currentSubtitle;
+      if (subtitleToCheck) {
+        const shouldPause = shouldPauseAtEndTime(subtitleToCheck, currentTime);
+        if (shouldPause) {
+          // Pause video
+          pause(video);
+          console.log('[SubtitleDisplay] Video paused at end_sec_th for subtitle:', subtitleToCheck.id);
+          // #region agent log
+          fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleTimeUpdate',message:'Paused at end_sec_th',data:{subtitleId:subtitleToCheck.id,currentTime,endTime:subtitleToCheck.end_sec_th},timestamp:Date.now(),runId:'run1',hypothesisId:'PAUSE_LOGIC'})}).catch(()=>{});
+          // #endregion
+        }
+      }
     }
   };
   
   // Handle manual unpause - exit editing mode
   const handlePlay = () => {
-    if (isEditingMode && video && !video.paused) {
+    // Use coordinator to handle manual unpause
+    const result = handleManualUnpause(video, isEditingMode);
+    if (result.shouldExitEditing) {
       // User manually unpaused, exit editing mode
       isEditingMode = false;
       setSelectedToken(null, null, null);
@@ -753,31 +810,68 @@ function setupVideoEvents(video: HTMLVideoElement): void {
   videoPlayHandler = handlePlay;
   
   // Initial update if video already has time
-  if (video.currentTime !== null && !isNaN(video.currentTime) && subtitles.length > 0) {
-    const newSubtitle = findCurrentSubtitle(video.currentTime);
-    if (newSubtitle?.id !== currentSubtitle?.id) {
-      currentSubtitle = newSubtitle;
-      // Update current subtitle ID for timeline navigation
-      setCurrentSubtitleId(newSubtitle?.id || null);
-      updateSubtitleDisplay();
+  (async () => {
+    const currentTime = await getNetflixCurrentTime();
+    if (currentTime !== null && !isNaN(currentTime)) {
+      // Find current subtitle based on time using O(1) map lookups
+      const newSubtitle = findCurrentSubtitleByTime(currentTime, currentSubtitle);
+      
+      if (newSubtitle?.id !== currentSubtitle?.id) {
+        // CRITICAL: Cache is source of truth - findCurrentSubtitleByTime already returns from cache
+        // But ensure we use cache directly (defensive check)
+        const subtitleFromCache = newSubtitle?.id ? getSubtitleById(newSubtitle.id) : null;
+        const subtitleToUse = subtitleFromCache || newSubtitle;
+        // Mount subtitle - this sets state/data correctly from cache
+        await mountSubtitle(subtitleToUse, displayMode, video);
+        // Update current subtitle ID for timeline navigation
+        setCurrentSubtitleId(subtitleToUse?.id || null);
+      }
     }
-  }
+  })();
 }
 
 /**
  * Load subtitles and start displaying
  */
-function loadSubtitles(newSubtitles: SubtitleTh[]): void {
+async function loadSubtitles(newSubtitles: SubtitleTh[]): Promise<void> {
   subtitles = newSubtitles;
-  // Update subtitle cache for timeline navigation
+  // CRITICAL: Update cache FIRST before any operations that use it
+  // Cache is the source of truth - all subtitle references must come from cache
+  // When subtitles are loaded from DB, they should already have meaning_id values in tokens
+  // Cache stores these values, and all subtitle references must come from cache
   setSubtitleCache(newSubtitles);
+  // #region agent log
+  const firstSubtitleTokenMeaningIds = newSubtitles[0]?.tokens_th?.tokens?.slice(0, 5).map((t, idx) => {
+    if (typeof t === 'object' && t !== null && 'meaning_id' in t) {
+      return { index: idx, meaningId: (t as any).meaning_id?.toString() || null };
+    }
+    return { index: idx, meaningId: null };
+  }) || [];
+  const meaningIdCount = newSubtitles[0]?.tokens_th?.tokens?.filter(t => typeof t === 'object' && t !== null && 'meaning_id' in t).length || 0;
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:loadSubtitles',message:'CACHE_SET_FIRST',data:{subtitleCount:newSubtitles.length,hasVideoElement:!!videoElement,currentSubtitleId:currentSubtitle?.id,firstSubtitleId:newSubtitles[0]?.id,firstSubtitleTokenCount:newSubtitles[0]?.tokens_th?.tokens?.length || 0,firstSubtitleTokenMeaningIds,meaningIdCount},timestamp:Date.now(),runId:'run1',hypothesisId:'H5'})}).catch(()=>{});
+  // #endregion
   
   if (videoElement && subtitles.length > 0) {
-    const newSubtitle = findCurrentSubtitle(videoElement.currentTime);
-    currentSubtitle = newSubtitle;
+    // Find current subtitle based on video time
+    const currentTime = await getNetflixCurrentTime();
+    let subtitleToMount: SubtitleTh | null = null;
+    
+    if (currentTime !== null && !isNaN(currentTime)) {
+      subtitleToMount = findCurrentSubtitleByTime(currentTime, currentSubtitle);
+    }
+    
+    const oldSubtitleId = currentSubtitle?.id || null;
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:loadSubtitles',message:'LOAD_SUBTITLES - Before mount',data:{subtitleId:subtitleToMount?.id,oldSubtitleId,subtitleCount:newSubtitles.length},timestamp:Date.now(),runId:'run1',hypothesisId:'MOUNT'})}).catch(()=>{});
+    // #endregion
+    
+    // Mount subtitle - this sets state/data correctly from cache
+    await mountSubtitle(subtitleToMount, displayMode, videoElement);
+    
     // Update current subtitle ID for timeline navigation
-    setCurrentSubtitleId(newSubtitle?.id || null);
-    updateSubtitleDisplay();
+    setCurrentSubtitleId(subtitleToMount?.id || null);
+    renderTokenArea(); // Ensure TokenArea is rendered after subtitle load
   } else {
     currentSubtitle = null;
     setCurrentSubtitleId(null);
@@ -862,6 +956,9 @@ async function initializeLayoutSystem(video: HTMLVideoElement): Promise<boolean>
   try {
     cleanupLayoutSystem();
     
+    // Reset initial pause flag so video pauses on entry
+    hasInitialPause = false;
+    
     const { container, video: foundVideo } = findVideoContainer();
     if (!container || !foundVideo) {
       console.error('[SubtitleDisplay] initializeLayoutSystem: No container or video found');
@@ -890,13 +987,42 @@ async function initializeLayoutSystem(video: HTMLVideoElement): Promise<boolean>
     // Setup video events
     setupVideoEvents(foundVideo);
 
-    // Setup arrow key navigation
-    setupArrowKeyNavigation();
-    setupNumberKeySelection(handleNumberKeySelection);
+    // Initialize timeline navigation hotkeys
+    initializeTimelineHotkeys({
+      mountSubtitleDirectly: async (subtitleId: string) => {
+        // Set flag to prevent time-based subtitle changes
+        isHotkeyNavigationActive = true;
+        // Clear any existing timeout
+        if (hotkeyNavigationTimeout) {
+          clearTimeout(hotkeyNavigationTimeout);
+        }
+        // Reset flag after a short delay (enough for seek to complete)
+        hotkeyNavigationTimeout = setTimeout(() => {
+          isHotkeyNavigationActive = false;
+          hotkeyNavigationTimeout = null;
+        }, 1000); // 1 second should be enough for seek to complete
+        
+        const subtitle = getSubtitleById(subtitleId);
+        if (subtitle) {
+          await mountSubtitle(subtitle, displayMode, foundVideo);
+          setCurrentSubtitleId(subtitleId);
+        }
+      },
+    });
+    
+    // Initialize meaning selection hotkeys
+    initializeMeaningHotkeys({
+      getSelectedSubtitleId: () => selectedSubtitleId,
+      getSelectedTokenIndex: () => selectedTokenIndex,
+      getMeaningsByToken: () => meaningsByToken,
+      handleMeaningSelect: handleMeaningSelect,
+    });
 
     const mediaId = getMediaIdFromUrl(window.location.href);
     if (mediaId) {
-      fetchSubtitles(mediaId)
+      // CRITICAL: Use TanStack Query for all database operations
+      // This ensures proper caching and cache invalidation
+      getSubtitles(mediaId)
         .then(newSubtitles => {
           if (newSubtitles.length > 0) {
             loadSubtitles(newSubtitles);
@@ -1015,17 +1141,13 @@ function cleanupLayoutSystem(): void {
     videoTimeHandler = null;
   }
   
-  // Cancel in-flight async operations
-  if (updateAbortController) {
-    updateAbortController.abort();
-    updateAbortController = null;
-  }
   
   // DO NOT unmount React roots (rule 5: mount once, reuse)
   // DO NOT remove rectangles (rule 4: never recreate)
   
-  // Remove arrow key navigation
-  removeArrowKeyNavigation();
+  // Cleanup hotkeys
+  cleanupTimelineHotkeys();
+  cleanupMeaningHotkeys();
   
   // Clear state references (but keep DOM elements and React roots)
   videoContainer = null;
