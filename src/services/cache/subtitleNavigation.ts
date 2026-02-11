@@ -237,6 +237,10 @@ export function setSubtitleCache(subtitles: SubtitleTh[]): void {
   }
 }
 
+export function getSubtitleCache(): SubtitleTh[] {
+  return subtitleCache;
+}
+
 export function setCurrentSubtitleId(id: string | null): void {
   currentSubtitleId = id;
 }

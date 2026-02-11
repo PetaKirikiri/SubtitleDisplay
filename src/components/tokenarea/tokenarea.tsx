@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { updateMeaning, deleteMeaning, createMeaning } from '../../supabase';
+import { updateMeaning, deleteMeaning, createMeaning, saveWordOnly } from '../../supabase';
 import { getMeanings, invalidateMeanings, saveTokenMeaning } from '../../hooks/useSubtitles';
 import { setSubtitleCache } from '../../services/cache/subtitleNavigation';
 import type { MeaningTh } from '@/schemas/meaningThSchema';
 import type { SubtitleTh } from '@/schemas/subtitleThSchema';
+import { SubtitleEditor } from './SubtitleEditor';
 
 interface MeaningCardProps {
   meaning: MeaningTh;
@@ -33,10 +34,23 @@ const MeaningCard: React.FC<MeaningCardProps> = ({
   const [editedPosEng, setEditedPosEng] = useState(meaning.pos_eng);
   const [editedPosTh, setEditedPosTh] = useState(meaning.pos_th);
   const [editedSource, setEditedSource] = useState(meaning.source || '');
+  const [editedLabelEng, setEditedLabelEng] = useState(meaning.label_eng || '');
   const [isSaving, setIsSaving] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Sync state with props ONLY when NOT editing - prevents defocus during editing
+  useEffect(() => {
+    if (!isEditing) {
+      setEditedText(meaning.definition_th);
+      setEditedDefinitionEng(meaning.definition_eng);
+      setEditedPosEng(meaning.pos_eng);
+      setEditedPosTh(meaning.pos_th);
+      setEditedSource(meaning.source || '');
+      setEditedLabelEng(meaning.label_eng || '');
+    }
+  }, [meaning.definition_th, meaning.definition_eng, meaning.pos_eng, meaning.pos_th, meaning.source, meaning.label_eng, isEditing]);
 
   // Focus textarea when entering edit mode
   useEffect(() => {
@@ -66,6 +80,7 @@ const MeaningCard: React.FC<MeaningCardProps> = ({
     setEditedPosEng(meaning.pos_eng);
     setEditedPosTh(meaning.pos_th);
     setEditedSource(meaning.source || '');
+    setEditedLabelEng(meaning.label_eng || '');
   };
 
   const handleCancel = () => {
@@ -75,6 +90,7 @@ const MeaningCard: React.FC<MeaningCardProps> = ({
     setEditedPosEng(meaning.pos_eng);
     setEditedPosTh(meaning.pos_th);
     setEditedSource(meaning.source || '');
+    setEditedLabelEng(meaning.label_eng || '');
   };
 
   const handleSave = async () => {
@@ -106,6 +122,7 @@ const MeaningCard: React.FC<MeaningCardProps> = ({
         pos_eng: editedPosEng.trim(),
         pos_th: editedPosTh.trim(),
         source: editedSource.trim() || undefined,
+        label_eng: editedLabelEng.trim() || undefined,
       });
       setIsEditing(false);
       onMeaningUpdate?.(updated);
@@ -243,6 +260,17 @@ const MeaningCard: React.FC<MeaningCardProps> = ({
                   </div>
                 </div>
                 <div>
+                  <div className="block text-white/70 text-sm mb-1">Label (English) (optional)</div>
+                  <input
+                    type="text"
+                    value={editedLabelEng}
+                    onChange={(e) => setEditedLabelEng(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    className="w-full bg-white/10 border border-white/20 rounded p-2 text-white/90 focus:outline-none focus:border-[#e50914]"
+                    placeholder="English label (optional)"
+                  />
+                </div>
+                <div>
                   <div className="block text-white/70 text-sm mb-1">Source (optional)</div>
                   <input
                     type="text"
@@ -276,6 +304,11 @@ const MeaningCard: React.FC<MeaningCardProps> = ({
             ) : (
               <>
                 <div className="mb-3">
+                  {meaning.label_eng && (
+                    <div className="mb-3 px-4 py-2 bg-[#e50914]/30 text-[#e50914] rounded text-3xl font-bold select-text border border-[#e50914]/50">
+                      {meaning.label_eng}
+                    </div>
+                  )}
                   <div className="flex gap-2 mb-2">
                     <div className="px-4 py-3 bg-[#e50914]/20 text-[#e50914] rounded text-2xl font-semibold select-text">
                       {meaning.pos_th}
@@ -351,6 +384,10 @@ export interface TokenAreaProps {
   onMeaningSelect?: (tokenIndex: number, meaningId: bigint) => void; // Called when meaning is selected - component handles save internally
   onMeaningsFetched?: (meanings: MeaningTh[]) => void;
   onMeaningSelectComplete?: () => void; // Called after save completes - parent can refresh
+  onMeaningUpdate?: (meaning: MeaningTh) => void; // Called when a meaning is updated - parent can update cache
+  showEditor?: boolean; // If true, show SubtitleEditor instead of meaning selection UI
+  onSubtitleUpdate?: (updatedSubtitle: SubtitleTh) => void; // Called when subtitle is updated via editor
+  onToggleEditor?: () => void; // Called when toggle button is clicked
 }
 
 export const TokenArea: React.FC<TokenAreaProps> = ({ 
@@ -362,7 +399,11 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
   currentSubtitle = null,
   onMeaningSelect,
   onMeaningsFetched,
-  onMeaningSelectComplete
+  onMeaningSelectComplete,
+  onMeaningUpdate: onMeaningUpdateExternal,
+  showEditor = false,
+  onSubtitleUpdate,
+  onToggleEditor
 }) => {
   // #region agent log
   const selectedMeaningIdType = typeof selectedMeaningId;
@@ -377,6 +418,7 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
   const [newPosEng, setNewPosEng] = useState('');
   const [newPosTh, setNewPosTh] = useState('');
   const [newSource, setNewSource] = useState('');
+  const [newLabelEng, setNewLabelEng] = useState('');
   const [isSavingNew, setIsSavingNew] = useState(false);
   const newTextareaRef = useRef<HTMLTextAreaElement>(null);
   
@@ -431,6 +473,8 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
     setMeanings(prev => prev.map(m => m.id === updatedMeaning.id ? updatedMeaning : m));
     // Refresh to ensure consistency (will use cache if fresh, or fetch if stale)
     await fetchMeanings();
+    // Notify parent to update meaning label cache
+    onMeaningUpdateExternal?.(updatedMeaning);
   };
   
   // Handle meaning delete
@@ -512,6 +556,7 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
     setNewPosEng('');
     setNewPosTh('');
     setNewSource('');
+    setNewLabelEng('');
   };
   
   const handleCancelCreate = () => {
@@ -521,6 +566,7 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
     setNewPosEng('');
     setNewPosTh('');
     setNewSource('');
+    setNewLabelEng('');
   };
   
   const handleSaveNew = async () => {
@@ -546,13 +592,25 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
     
     setIsSavingNew(true);
     try {
+      // First, ensure the word exists in words_th table
+      try {
+        await saveWordOnly({
+          word_th: selectedToken,
+        });
+      } catch (wordError) {
+        console.warn('[TokenArea] Failed to save word to words_th (non-critical):', wordError);
+        // Continue even if word save fails - meaning creation can still proceed
+      }
+      
+      // Then create the meaning
       const newMeaning = await createMeaning(
         selectedToken, 
         newDefinition.trim(), 
         newDefinitionEng.trim(),
         newPosEng.trim(),
         newPosTh.trim(),
-        newSource.trim() || undefined
+        newSource.trim() || undefined,
+        newLabelEng.trim() || undefined
       );
       setMeanings(prev => [...prev, newMeaning].sort((a, b) => {
         // Sort by ID (newer meanings typically have higher IDs)
@@ -564,6 +622,9 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
       setNewPosEng('');
       setNewPosTh('');
       setNewSource('');
+      setNewLabelEng('');
+      // Notify parent to update meaning label cache
+      onMeaningUpdateExternal?.(newMeaning);
       // Invalidate cache so next fetch includes the new meaning
       await invalidateMeanings(selectedToken);
       // Refresh to ensure consistency (will fetch fresh data including new meaning)
@@ -589,7 +650,29 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
     <div
       className="relative h-full w-full bg-black text-white p-6 overflow-auto pointer-events-auto box-border border-l-[3px] border-l-[#e50914] border-t-0 border-r-0 border-b-0 text-4xl select-text"
     >
-      {selectedToken ? (
+      {/* Toggle button */}
+      {onToggleEditor && (
+        <div className="absolute top-2 right-2 z-50">
+          <button
+            onClick={onToggleEditor}
+            className={`px-4 py-2 rounded text-sm font-medium transition-colors ${
+              showEditor
+                ? 'bg-[#e50914] text-white hover:bg-[#e50914]/80'
+                : 'bg-white/10 text-white hover:bg-white/20 border border-white/20'
+            }`}
+            title={showEditor ? 'Switch to Meaning Mode' : 'Switch to Editor Mode'}
+          >
+            {showEditor ? 'Meaning Mode' : 'Editor Mode'}
+          </button>
+        </div>
+      )}
+      
+      {showEditor ? (
+        <SubtitleEditor
+          currentSubtitle={currentSubtitle}
+          onSubtitleUpdate={onSubtitleUpdate}
+        />
+      ) : selectedToken ? (
         isLoading ? (
           <div className="flex items-center justify-center h-full">
             <div className="flex flex-col items-center gap-3">
@@ -694,6 +777,17 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
                       </div>
                     </div>
                     <div>
+                      <div className="block text-white/70 text-sm mb-1">Label (English) (optional)</div>
+                      <input
+                        type="text"
+                        value={newLabelEng}
+                        onChange={(e) => setNewLabelEng(e.target.value)}
+                        onKeyDown={handleNewKeyDown}
+                        className="w-full bg-white/10 border border-white/20 rounded p-2 text-white/90 focus:outline-none focus:border-[#e50914]"
+                        placeholder="English label (optional)"
+                      />
+                    </div>
+                    <div>
                       <div className="block text-white/70 text-sm mb-1">Source (optional)</div>
                       <input
                         type="text"
@@ -739,14 +833,121 @@ export const TokenArea: React.FC<TokenAreaProps> = ({
             </div>
           </div>
         ) : (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-center">
-              <div className="text-white/40 text-7xl mb-3">📖</div>
+          <div>
+            <div className="mb-6 pb-4 border-b border-white/10">
+              <div className="text-white font-semibold mb-2 select-text">
+                Meanings for:{' '}
+                <span className="text-[#e50914] font-bold">{selectedToken}</span>
+              </div>
               <div className="text-white/60 select-text">
-                No meanings found for:{' '}
-                <span className="text-[#e50914] font-semibold">{selectedToken}</span>
+                No meanings found
               </div>
             </div>
+            
+            {/* Add New Meaning Form - shown when no meanings exist */}
+            {isCreating ? (
+              <div className="bg-white/5 border-2 border-dashed border-[#e50914]/50 rounded-lg p-6">
+                <div className="space-y-4">
+                  <div className="text-white font-semibold mb-4">Add New Meaning</div>
+                  <div>
+                    <div className="block text-white/70 text-sm mb-1">Definition (Thai)</div>
+                    <textarea
+                      ref={newTextareaRef}
+                      value={newDefinition}
+                      onChange={(e) => setNewDefinition(e.target.value)}
+                      onKeyDown={handleNewKeyDown}
+                      className="w-full bg-white/10 border border-white/20 rounded p-3 text-white/90 leading-loose focus:outline-none focus:border-[#e50914] resize-y min-h-[120px]"
+                      placeholder="Enter Thai definition..."
+                    />
+                  </div>
+                  <div>
+                    <div className="block text-white/70 text-sm mb-1">Definition (English)</div>
+                    <textarea
+                      value={newDefinitionEng}
+                      onChange={(e) => setNewDefinitionEng(e.target.value)}
+                      onKeyDown={handleNewKeyDown}
+                      className="w-full bg-white/10 border border-white/20 rounded p-3 text-white/90 leading-loose focus:outline-none focus:border-[#e50914] resize-y min-h-[120px]"
+                      placeholder="Enter English definition..."
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="block text-white/70 text-sm mb-1">POS (Thai)</div>
+                      <input
+                        type="text"
+                        value={newPosTh}
+                        onChange={(e) => setNewPosTh(e.target.value)}
+                        onKeyDown={handleNewKeyDown}
+                        className="w-full bg-white/10 border border-white/20 rounded p-2 text-white/90 focus:outline-none focus:border-[#e50914]"
+                        placeholder="Part of speech (Thai)"
+                      />
+                    </div>
+                    <div>
+                      <div className="block text-white/70 text-sm mb-1">POS (English)</div>
+                      <input
+                        type="text"
+                        value={newPosEng}
+                        onChange={(e) => setNewPosEng(e.target.value)}
+                        onKeyDown={handleNewKeyDown}
+                        className="w-full bg-white/10 border border-white/20 rounded p-2 text-white/90 focus:outline-none focus:border-[#e50914]"
+                        placeholder="Part of speech (English)"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <div className="block text-white/70 text-sm mb-1">Label (English) (optional)</div>
+                    <input
+                      type="text"
+                      value={newLabelEng}
+                      onChange={(e) => setNewLabelEng(e.target.value)}
+                      onKeyDown={handleNewKeyDown}
+                      className="w-full bg-white/10 border border-white/20 rounded p-2 text-white/90 focus:outline-none focus:border-[#e50914]"
+                      placeholder="English label (optional)"
+                    />
+                  </div>
+                  <div>
+                    <div className="block text-white/70 text-sm mb-1">Source (optional)</div>
+                    <input
+                      type="text"
+                      value={newSource}
+                      onChange={(e) => setNewSource(e.target.value)}
+                      onKeyDown={handleNewKeyDown}
+                      className="w-full bg-white/10 border border-white/20 rounded p-2 text-white/90 focus:outline-none focus:border-[#e50914]"
+                      placeholder="Source (optional)"
+                    />
+                  </div>
+                  <div className="flex gap-3">
+                    <button
+                      onClick={handleSaveNew}
+                      disabled={isSavingNew || !newDefinition.trim() || !newDefinitionEng.trim() || !newPosEng.trim() || !newPosTh.trim()}
+                      className="px-6 py-2 bg-[#e50914] text-white rounded hover:bg-[#e50914]/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-semibold"
+                    >
+                      {isSavingNew ? 'Creating...' : 'Create'}
+                    </button>
+                    <button
+                      onClick={handleCancelCreate}
+                      disabled={isSavingNew}
+                      className="px-6 py-2 bg-white/10 text-white rounded hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-semibold"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  <div className="text-white/60">
+                    Press Ctrl+Enter to save, Esc to cancel
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={handleCreateNew}
+                className="w-full py-6 bg-[#e50914] text-white rounded-lg hover:bg-[#e50914]/80 transition-colors font-semibold flex items-center justify-center gap-3"
+              >
+                <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+                Add New Meaning
+              </button>
+            )}
           </div>
         )
       ) : (

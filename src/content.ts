@@ -25,6 +25,7 @@ import { unpause, getCurrentTime as getNetflixCurrentTime, pause } from './servi
 import type { MeaningTh } from '@/schemas/meaningThSchema';
 import { setMeaningsForToken } from './components/tokenarea/helpers/subtitleMeaningsCache';
 import { handleManualUnpause } from './services/video/handleManualUnpause';
+import { fetchMeaningsByIds, fetchMeaningById } from './supabase';
 
 let isExtracting = false;
 let resizeObserver: ResizeObserver | null = null;
@@ -54,6 +55,27 @@ let selectedSubtitleId: string | null = null;
 // Maps "subtitleId_tokenIndex" to meanings array
 let meaningsByToken: Map<string, MeaningTh[]> = new Map();
 
+// Cache for meaning labels (meaning_id -> label_eng)
+// Preloaded when subtitles are loaded
+let meaningLabelsCache: Map<string, string> = new Map();
+
+/**
+ * Update meaning labels cache with a single meaning
+ * Called when a meaning is selected, updated, or created
+ */
+async function updateMeaningLabelCache(meaningId: bigint): Promise<void> {
+  try {
+    const meaning = await fetchMeaningById(meaningId);
+    if (meaning && meaning.label_eng) {
+      meaningLabelsCache.set(meaning.id.toString(), meaning.label_eng);
+      // Re-render SubArea to show updated label
+      renderSubArea();
+    }
+  } catch (error) {
+    console.error(`[updateMeaningLabelCache] Failed to fetch meaning ${meaningId.toString()}:`, error);
+  }
+}
+
 // Flag to prevent time-based subtitle changes immediately after hotkey navigation
 let isHotkeyNavigationActive = false;
 let hotkeyNavigationTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -68,6 +90,17 @@ let hasTokensShown: boolean = false;
 
 // Auto-select state - tracks if we should auto-select first meaning when meanings are fetched
 let shouldAutoSelectFirstMeaning: boolean = false;
+
+// Subtitle editor toggle state - controls whether to show SubtitleEditor or meaning selection in TokenArea
+let showSubtitleEditor: boolean = false;
+
+/**
+ * Toggle between SubtitleEditor and meaning selection views in TokenArea
+ */
+function toggleSubtitleEditor(): void {
+  showSubtitleEditor = !showSubtitleEditor;
+  renderTokenArea();
+}
 
 function setSelectedToken(token: string | null, index: number | null = null, subtitleId: string | null = null): void {
   // #region agent log
@@ -173,12 +206,12 @@ async function mountSubtitle(
   const subtitleToUse = subtitleFromCache || subtitle;
   
   // Reset selected token state when subtitle changes
-  if (currentSubtitle?.id !== subtitleToUse.id) {
+  const subtitleChanged = currentSubtitle?.id !== subtitleToUse.id;
+  if (subtitleChanged) {
     selectedToken = null;
     selectedTokenIndex = null;
     selectedSubtitleId = null;
-    // Clear TokenArea display when subtitle changes
-    renderTokenArea();
+    // Clear TokenArea display when subtitle changes (will be re-rendered at end of mountSubtitle)
   }
   
   // #region agent log - Log token meaning_id states BEFORE mount (this is the state being set)
@@ -252,6 +285,8 @@ async function mountSubtitle(
 
   // Render SubArea - it will read state and apply Tailwind classes reactively
   renderSubArea();
+  // Also render TokenArea to ensure SubtitleEditor gets updated currentSubtitle
+  renderTokenArea();
 }
 
 /**
@@ -354,6 +389,7 @@ function renderSubArea(): void {
         tokens, // Pass tokens directly
         onTokenClick: handleTokenClick,
         selectedTokenIndex,
+        meaningLabels: meaningLabelsCache, // Pass preloaded meaning labels cache
       })
     );
   }
@@ -454,6 +490,12 @@ async function handleMeaningSelectComplete(): Promise<void> {
           // #region agent log
           fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'content.ts:handleMeaningSelectComplete',message:'CALLING_NAVIGATE_NEXT_UNTAGGED',data:{selectedTokenIndex},timestamp:Date.now(),runId:'run1',hypothesisId:'F'})}).catch(()=>{});
           // #endregion
+          // Update meaning label cache for the newly assigned meaning
+          const tokenMeaningId = typeof token === 'object' && token !== null && 'meaning_id' in token ? (token as any).meaning_id : null;
+          if (tokenMeaningId !== null && tokenMeaningId !== undefined) {
+            const meaningId = typeof tokenMeaningId === 'bigint' ? tokenMeaningId : BigInt(tokenMeaningId);
+            updateMeaningLabelCache(meaningId);
+          }
           // Current token now has meaning_id, move to next untagged token
           navigateToNextUntaggedToken();
         } else {
@@ -507,6 +549,9 @@ function handleMeaningsFetched(meanings: MeaningTh[]): void {
  */
 function renderTokenArea(): void {
   if (additionalInformationAreaRoot && rightRect) {
+    // CRITICAL: Always get latest subtitle from cache to ensure SubtitleEditor shows current subtitle
+    const latestCurrentSubtitle = currentSubtitle?.id ? getSubtitleById(currentSubtitle.id) : currentSubtitle;
+    
     // Use subtitle from cache that matches selectedSubtitleId
     // This ensures we get the latest updated subtitle with meaning_id after selection
     const subtitleForToken = selectedSubtitleId ? getSubtitleById(selectedSubtitleId) : null;
@@ -556,10 +601,31 @@ function renderTokenArea(): void {
         tokenIndex: selectedTokenIndex,
         selectedMeaningId: meaningId, // Pass meaning_id so TokenArea knows which meaning is selected
         subtitles: subtitles,
-        currentSubtitle: currentSubtitle,
+        currentSubtitle: latestCurrentSubtitle,
         onMeaningSelect: handleMeaningSelect, // For external calls (hotkeys)
         onMeaningSelectComplete: handleMeaningSelectComplete, // Called after save completes
         onMeaningsFetched: handleMeaningsFetched,
+        onMeaningUpdate: async (updatedMeaning: MeaningTh) => {
+          // Update meaning label cache when a meaning is updated
+          if (updatedMeaning.label_eng) {
+            meaningLabelsCache.set(updatedMeaning.id.toString(), updatedMeaning.label_eng);
+          } else {
+            // Remove from cache if label_eng was cleared
+            meaningLabelsCache.delete(updatedMeaning.id.toString());
+          }
+          renderSubArea(); // Re-render to show updated label
+        },
+        showEditor: showSubtitleEditor,
+        onToggleEditor: toggleSubtitleEditor,
+        onSubtitleUpdate: (updatedSubtitle: SubtitleTh) => {
+          // Update currentSubtitle from cache after subtitle edit
+          const updatedFromCache = getSubtitleById(updatedSubtitle.id);
+          if (updatedFromCache) {
+            currentSubtitle = updatedFromCache;
+          }
+          renderSubArea();
+          renderTokenArea();
+        },
       })
     );
   }
@@ -840,6 +906,40 @@ async function loadSubtitles(newSubtitles: SubtitleTh[]): Promise<void> {
   // When subtitles are loaded from DB, they should already have meaning_id values in tokens
   // Cache stores these values, and all subtitle references must come from cache
   setSubtitleCache(newSubtitles);
+  
+  // Preload all meaning labels for tokens with meaning_id
+  const meaningIds = new Set<bigint>();
+  newSubtitles.forEach((subtitle) => {
+    const tokens = subtitle.tokens_th?.tokens;
+    if (tokens) {
+      tokens.forEach((token) => {
+        if (typeof token === 'object' && token !== null && 'meaning_id' in token) {
+          const meaningId = token.meaning_id;
+          if (meaningId !== undefined && meaningId !== null) {
+            const id = typeof meaningId === 'bigint' ? meaningId : BigInt(meaningId);
+            meaningIds.add(id);
+          }
+        }
+      });
+    }
+  });
+  
+  // Batch fetch all meanings
+  if (meaningIds.size > 0) {
+    try {
+      const meanings = await fetchMeaningsByIds(Array.from(meaningIds));
+      const newLabelsCache = new Map<string, string>();
+      meanings.forEach((meaning) => {
+        if (meaning.label_eng) {
+          newLabelsCache.set(meaning.id.toString(), meaning.label_eng);
+        }
+      });
+      meaningLabelsCache = newLabelsCache;
+    } catch (error) {
+      console.error('[loadSubtitles] Failed to preload meaning labels:', error);
+      // Continue even if preload fails - SubArea can fetch individually
+    }
+  }
   // #region agent log
   const firstSubtitleTokenMeaningIds = newSubtitles[0]?.tokens_th?.tokens?.slice(0, 5).map((t, idx) => {
     if (typeof t === 'object' && t !== null && 'meaning_id' in t) {

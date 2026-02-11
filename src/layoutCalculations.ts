@@ -34,6 +34,7 @@ export function calculateLayout(videoElement: HTMLVideoElement, containerElement
   // Calculate the 3 outputs
   const MIN_SUBTITLE_HEIGHT = 250;
   const MIN_ADDITIONAL_WIDTH = 300;
+  const VIDEO_SIZE_REDUCTION = 0.90; // Reduce video to 90% of constrained size to give more room to panels
 
   let videoWidth = screenWidth;
   let videoHeight = videoWidth / videoAspectRatio;
@@ -48,6 +49,10 @@ export function calculateLayout(videoElement: HTMLVideoElement, containerElement
     videoWidth = screenWidth - MIN_ADDITIONAL_WIDTH;
     videoHeight = videoWidth / videoAspectRatio;
   }
+
+  // Apply additional reduction to give more room to panels
+  videoWidth = videoWidth * VIDEO_SIZE_REDUCTION;
+  videoHeight = videoHeight * VIDEO_SIZE_REDUCTION;
 
   const subtitleHeight = Math.max(screenHeight - videoHeight, MIN_SUBTITLE_HEIGHT);
   const additionalWidth = Math.max(screenWidth - videoWidth, 0);

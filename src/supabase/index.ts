@@ -604,6 +604,7 @@ export async function fetchMeaningsByWordTh(wordTh: string): Promise<MeaningTh[]
   const normalizedData = (data || []).map((meaning) => {
     if (meaning.word_th_id === null) meaning.word_th_id = undefined;
     if (meaning.source === null) meaning.source = undefined;
+    if (meaning.label_eng === null) meaning.label_eng = undefined;
     
     // Normalize created_at: convert Date objects to ISO string, null to undefined, invalid strings to undefined
     if (meaning.created_at === null) {
@@ -727,6 +728,7 @@ export async function saveSenses(
     pos_eng: string;
     pos_th: string;
     source?: string;
+    label_eng?: string;
     created_at?: string;
     word_th_id?: string;
   }>,
@@ -756,6 +758,7 @@ export async function saveSenses(
     pos_th: sense.pos_th,
     word_th_id: sense.word_th_id || null,
     source: sense.source || null,
+    label_eng: sense.label_eng || null,
     created_at: sense.created_at || null,
   }));
 
@@ -821,7 +824,8 @@ export async function createMeaning(
   definitionEng: string,
   posEng: string,
   posTh: string,
-  source?: string
+  source?: string,
+  labelEng?: string
 ): Promise<MeaningTh> {
   console.log(`[Create] Creating new meaning for word "${wordTh}"`);
   
@@ -852,6 +856,7 @@ export async function createMeaning(
     pos_th: posTh.trim(),
     word_th_id: wordTh,
     source: source?.trim() || undefined,
+    label_eng: labelEng?.trim() || undefined,
   };
   
   // Validate definition_th is non-empty
@@ -868,6 +873,7 @@ export async function createMeaning(
     pos_th: meaningData.pos_th,
     word_th_id: meaningData.word_th_id || null,
     source: meaningData.source || null,
+    label_eng: meaningData.label_eng || null,
     created_at: now,
   };
   
@@ -911,7 +917,8 @@ export async function updateMeaning(
     definition_eng?: string;
     pos_eng?: string;
     pos_th?: string;
-    source?: string 
+    source?: string;
+    label_eng?: string;
   }
 ): Promise<MeaningTh> {
   console.log(`[Update] Updating meaning with ID ${meaningId.toString()}`);
@@ -953,13 +960,18 @@ export async function updateMeaning(
     updates.source = updates.source.trim() || undefined;
   }
   
+  if (updates.label_eng !== undefined) {
+    updates.label_eng = updates.label_eng.trim() || undefined;
+  }
+  
   // Prepare update data (only include provided fields)
   const updateData: { 
     definition_th?: string; 
     definition_eng?: string;
     pos_eng?: string;
     pos_th?: string;
-    source?: string | null 
+    source?: string | null;
+    label_eng?: string | null;
   } = {};
   if (updates.definition_th !== undefined) {
     updateData.definition_th = updates.definition_th;
@@ -975,6 +987,9 @@ export async function updateMeaning(
   }
   if (updates.source !== undefined) {
     updateData.source = updates.source || null;
+  }
+  if (updates.label_eng !== undefined) {
+    updateData.label_eng = updates.label_eng || null;
   }
   
   if (Object.keys(updateData).length === 0) {
@@ -1003,6 +1018,7 @@ export async function updateMeaning(
     ...data,
     word_th_id: data.word_th_id === null ? undefined : data.word_th_id,
     source: data.source === null ? undefined : data.source,
+    label_eng: data.label_eng === null ? undefined : data.label_eng,
     created_at: data.created_at ? new Date(data.created_at).toISOString() : undefined,
   };
   
@@ -1011,6 +1027,109 @@ export async function updateMeaning(
   
   console.log(`[Update] ✓ Successfully updated meaning with ID ${meaningId.toString()}`);
   return validated;
+}
+
+/**
+ * Fetch multiple meanings by IDs from meanings_th table
+ * 
+ * 📋 Validates against: src/schemas/meaningThSchema.ts
+ * Returns array of validated MeaningTh objects
+ * 
+ * ⚠️ DATA INTEGRITY: Direct database query - always returns latest data from Supabase
+ */
+export async function fetchMeaningsByIds(meaningIds: bigint[]): Promise<MeaningTh[]> {
+  if (meaningIds.length === 0) {
+    return [];
+  }
+  
+  console.log(`[Fetch] Fetching ${meaningIds.length} meanings by IDs`);
+  
+  // Convert bigint IDs to strings for Supabase query
+  const idStrings = meaningIds.map(id => id.toString());
+  
+  const { data, error } = await supabase
+    .from('meanings_th')
+    .select('*')
+    .in('id', idStrings);
+  
+  if (error) {
+    console.error(`[Fetch] Failed to fetch meanings:`, error);
+    throw error;
+  }
+  
+  if (!data || data.length === 0) {
+    return [];
+  }
+  
+  // Normalize null to undefined for optional fields
+  const normalizedData = (data || []).map((meaning) => {
+    const normalized = {
+      ...meaning,
+      word_th_id: meaning.word_th_id === null ? undefined : meaning.word_th_id,
+      source: meaning.source === null ? undefined : meaning.source,
+      label_eng: meaning.label_eng === null ? undefined : meaning.label_eng,
+      created_at: meaning.created_at ? new Date(meaning.created_at).toISOString() : undefined,
+    };
+    
+    // Validate with Zod schema before returning
+    try {
+      return meaningThSchema.parse(normalized);
+    } catch (error) {
+      console.error(`[Fetch] Meaning validation failed for ID ${meaning.id}:`, error);
+      return null;
+    }
+  }).filter((meaning): meaning is MeaningTh => meaning !== null);
+  
+  return normalizedData;
+}
+
+/**
+ * Fetch a single meaning by ID from meanings_th table
+ * 
+ * 📋 Validates against: src/schemas/meaningThSchema.ts
+ * Returns validated MeaningTh object or null if not found
+ * 
+ * ⚠️ DATA INTEGRITY: Direct database query - always returns latest data from Supabase
+ */
+export async function fetchMeaningById(meaningId: bigint): Promise<MeaningTh | null> {
+  console.log(`[Fetch] Fetching meaning with ID ${meaningId.toString()}`);
+  
+  const { data, error } = await supabase
+    .from('meanings_th')
+    .select('*')
+    .eq('id', meaningId.toString())
+    .single();
+  
+  if (error) {
+    if (error.code === 'PGRST116') {
+      // No rows returned - meaning not found
+      console.log(`[Fetch] Meaning with ID ${meaningId.toString()} not found`);
+      return null;
+    }
+    console.error(`[Fetch] Failed to fetch meaning:`, error);
+    throw error;
+  }
+  
+  if (!data) {
+    return null;
+  }
+  
+  // Normalize null to undefined for optional fields
+  const normalizedData = {
+    ...data,
+    word_th_id: data.word_th_id === null ? undefined : data.word_th_id,
+    source: data.source === null ? undefined : data.source,
+    label_eng: data.label_eng === null ? undefined : data.label_eng,
+    created_at: data.created_at ? new Date(data.created_at).toISOString() : undefined,
+  };
+  
+  // Validate with Zod schema before returning
+  try {
+    return meaningThSchema.parse(normalizedData);
+  } catch (error) {
+    console.error(`[Fetch] Meaning validation failed for ID ${meaningId.toString()}:`, error);
+    return null;
+  }
 }
 
 /**

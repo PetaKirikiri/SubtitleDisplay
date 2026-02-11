@@ -94,6 +94,7 @@ export const wordsTh = pgTable('words_th', {
  * - pos_th → meaningThSchema.pos_th (text, required)
  * - word_th_id → meaningThSchema.word_th_id (text, optional, FK to words_th.word_th)
  * - source → meaningThSchema.source (text, optional)
+ * - label_eng → meaningThSchema.label_eng (text, optional)
  * - created_at → meaningThSchema.created_at (timestamp, optional)
  */
 export const meaningsTh = pgTable('meanings_th', {
@@ -101,6 +102,7 @@ export const meaningsTh = pgTable('meanings_th', {
   definition_th: text('definition_th').notNull(), // Maps to meaningThSchema.definition_th (required)
   word_th_id: text('word_th_id').references(() => wordsTh.word_th, { onDelete: 'cascade' }), // Maps to meaningThSchema.word_th_id (optional, FK to words_th.word_th)
   source: text('source'), // Maps to meaningThSchema.source (optional)
+  label_eng: text('label_eng'), // Maps to meaningThSchema.label_eng (optional)
   created_at: timestamp('created_at'), // Maps to meaningThSchema.created_at (optional)
   // V2 fields (optional in database for backward compatibility, but required by Zod schema)
   pos_th: text('pos_th'), // Maps to meaningThSchema.pos_th (required by Zod, nullable in DB)

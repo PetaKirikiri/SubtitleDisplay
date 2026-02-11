@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React from 'react';
 import type { DisplayMode } from '../../types/display';
 import type { SubtitleTh, TokenObject } from '@/schemas/subtitleThSchema';
 import { SubtitleDisplayModeDropdown } from './SubtitleDisplayModeDropdown';
@@ -11,6 +11,7 @@ export interface SubAreaProps {
   tokens?: TokenObject[] | string[]; // Pass tokens directly
   onTokenClick?: (index: number) => void;
   selectedTokenIndex?: number | null;
+  meaningLabels?: Map<string, string>; // Preloaded meaning labels cache (meaning_id -> label_eng)
 }
 
 // Track previous token states to detect unexpected background changes
@@ -24,6 +25,7 @@ export const SubArea: React.FC<SubAreaProps> = ({
   tokens,
   onTokenClick,
   selectedTokenIndex,
+  meaningLabels: meaningLabelsProp = new Map(),
 }) => {
   // Track token state changes for stability verification
   const subtitleId = currentSubtitle?.id || 'unknown';
@@ -98,26 +100,42 @@ export const SubArea: React.FC<SubAreaProps> = ({
             previousTokenStates.get(subtitleId)!.set(index, { meaningId: meaningIdStr, appliedStyle });
             // #endregion
             
+            // Get label_eng for this token if it has a meaning_id
+            let labelEng: string | undefined;
+            if (hasMeaning && meaningIdValue !== null) {
+              const meaningIdStr = typeof meaningIdValue === 'bigint' ? meaningIdValue.toString() : String(meaningIdValue);
+              labelEng = meaningLabelsProp.get(meaningIdStr);
+            }
+            
             return (
-              <span
+              <div
                 key={index}
-                className={`select-text cursor-pointer px-1 rounded transition-colors ${
-                  isCurrentToken
-                    ? 'border-4 border-yellow-400 bg-yellow-400/20 shadow-lg shadow-yellow-400/50'
-                    : hasMeaning
-                    ? 'bg-[#e50914]/20 border border-[#e50914]/50 hover:bg-[#e50914]/30'
-                    : 'hover:bg-white/20'
-                }`}
-                onClick={(e) => {
-                  // Only trigger click if no text is selected
-                  if (window.getSelection()?.toString().length === 0) {
-                    onTokenClick?.(index);
-                  }
-                }}
-                title={hasMeaning ? 'Meaning selected' : isCurrentToken ? 'Currently editing' : 'Click to select meaning'}
+                className="flex flex-col items-center"
               >
-                {tokenText}
-              </span>
+                {labelEng && (
+                  <div className="text-white text-[28px] mb-1 select-text font-medium">
+                    {labelEng}
+                  </div>
+                )}
+                <span
+                  className={`select-text cursor-pointer px-1 rounded transition-colors ${
+                    isCurrentToken
+                      ? 'border-4 border-yellow-400 bg-yellow-400/20 shadow-lg shadow-yellow-400/50'
+                      : hasMeaning
+                      ? 'bg-[#e50914]/20 border border-[#e50914]/50 hover:bg-[#e50914]/30'
+                      : 'hover:bg-white/20'
+                  }`}
+                  onClick={(e) => {
+                    // Only trigger click if no text is selected
+                    if (window.getSelection()?.toString().length === 0) {
+                      onTokenClick?.(index);
+                    }
+                  }}
+                  title={hasMeaning ? 'Meaning selected' : isCurrentToken ? 'Currently editing' : 'Click to select meaning'}
+                >
+                  {tokenText}
+                </span>
+              </div>
             );
           })}
         </div>
