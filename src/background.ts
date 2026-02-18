@@ -14,34 +14,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   if (message.type === 'INJECT_NETFLIX_SUBTITLE_SCRIPT') {
-    // Background script has access to chrome.tabs API
+    // Match SmartSubs: use chrome.tabs.query (content script runs on Netflix page, active tab is Netflix)
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs || tabs.length === 0 || !tabs[0].id) {
         sendResponse({ success: false, error: 'Could not get current tab ID' });
         return;
       }
-      
       const tabId = tabs[0].id;
-      
       chrome.scripting.executeScript({
-        target: { tabId: tabId },
+        target: { tabId },
         world: 'MAIN',
         func: (codeString) => {
-          // Use Function constructor instead of eval to avoid bundler warnings
           const func = new Function(codeString);
           func();
         },
         args: [message.code]
       })
-      .then(() => {
-        sendResponse({ success: true });
-      })
-      .catch((error) => {
-        sendResponse({ success: false, error: error.message });
-      });
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => sendResponse({ success: false, error: error.message }));
     });
-    
-    return true; // Indicates we will send a response asynchronously
+    return true;
   }
   
   if (message.type === 'INJECT_NETFLIX_PLAYER_SCRIPT') {

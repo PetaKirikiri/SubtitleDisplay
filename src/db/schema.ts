@@ -1,4 +1,4 @@
-import { pgTable, text, numeric, bigint, jsonb, timestamp } from 'drizzle-orm/pg-core';
+import { pgTable, text, numeric, bigint, jsonb, timestamp, primaryKey } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
 /**
@@ -132,3 +132,24 @@ export const meaningsThRelations = relations(meaningsTh, ({ one }) => ({
     references: [wordsTh.word_th],
   }),
 }));
+
+/**
+ * User Words Table
+ *
+ * SOURCE OF TRUTH: src/schemas/userWordsSchema.ts
+ *
+ * Composite primary key: (user_id, word_id)
+ * Columns: user_id (uuid), word_id (text), status (text), created_at (timestamp)
+ */
+export const userWords = pgTable(
+  'user_words',
+  {
+    user_id: text('user_id').notNull(),
+    word_id: text('word_id').notNull(),
+    status: text('status').notNull(),
+    created_at: timestamp('created_at'),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.user_id, table.word_id] }),
+  })
+);

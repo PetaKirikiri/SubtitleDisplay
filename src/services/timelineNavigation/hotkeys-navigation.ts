@@ -72,7 +72,11 @@ function handleArrowKeyDown(e: KeyboardEvent): void {
   if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'ArrowUp') {
     return;
   }
-  
+
+  // Don't handle keys when user is typing in TokenArea (e.g. login form)
+  const target = e.target instanceof Element ? e.target : null;
+  if (target?.closest('[data-token-area]')) return;
+
   // Ignore if input/textarea is focused
   const activeElement = document.activeElement;
   const isInputFocused = activeElement && 
@@ -102,7 +106,11 @@ function handleSpaceKey(e: KeyboardEvent): void {
   if (e.key !== ' ') {
     return;
   }
-  
+
+  // Don't handle keys when user is typing in TokenArea (e.g. login form)
+  const target = e.target instanceof Element ? e.target : null;
+  if (target?.closest('[data-token-area]')) return;
+
   // Ignore if input/textarea focused
   const activeElement = document.activeElement;
   const isInputFocused = activeElement && 

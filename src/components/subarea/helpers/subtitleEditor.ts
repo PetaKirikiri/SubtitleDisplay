@@ -7,7 +7,12 @@
 
 import { supabase } from '../../../supabase';
 import { subtitleThSchema, type SubtitleTh } from '@/schemas/subtitleThSchema';
-import { setSubtitleCache, getSubtitleCache } from '../../../services/cache/subtitleNavigation';
+import { updateSubtitlesCache } from '../../../lib/tanstackOperations';
+
+function getMediaIdFromSubtitleId(subtitleId: string): string | null {
+  const i = subtitleId.lastIndexOf('_');
+  return i !== -1 ? subtitleId.substring(0, i) : null;
+}
 
 /**
  * Update subtitle Thai text
@@ -20,7 +25,9 @@ export async function updateSubtitleThaiText(
   subtitleId: string,
   newThaiText: string
 ): Promise<SubtitleTh> {
-  console.log(`[Editor] Updating subtitle ${subtitleId} Thai text`);
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleThaiText',message:'Updating subtitle Thai text',data:{subtitleId,newThaiTextLength:newThaiText.length},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+  // #endregion
   
   if (!newThaiText.trim()) {
     throw new Error('Thai text cannot be empty');
@@ -34,7 +41,9 @@ export async function updateSubtitleThaiText(
     .single();
   
   if (fetchError) {
-    console.error(`[Editor] Failed to fetch subtitle:`, fetchError);
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleThaiText',message:'Failed to fetch subtitle',data:{subtitleId,error:fetchError.message,code:fetchError.code},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
     throw new Error(`Failed to fetch subtitle: ${fetchError.message}`);
   }
   
@@ -44,6 +53,14 @@ export async function updateSubtitleThaiText(
   
   // Validate subtitle
   const subtitle = subtitleThSchema.parse(subtitleData);
+  
+  // CRITICAL: Use the exact ID from the database, not the parameter
+  // This ensures we preserve the exact format (mediaId_index) and don't accidentally create new entries
+  const exactSubtitleId = subtitle.id;
+  
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleThaiText',message:'Using exact ID from database',data:{subtitleIdParam:subtitleId,exactIdFromDB:exactSubtitleId,idsMatch:subtitleId === exactSubtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+  // #endregion
   
   // Create updated subtitle
   const updatedSubtitle = {
@@ -57,40 +74,188 @@ export async function updateSubtitleThaiText(
   // Save to database
   let verifiedSubtitle: SubtitleTh;
   try {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleThaiText',message:'Attempting to update subtitle',data:{exactSubtitleId,thaiPreview:validated.thai.substring(0,50)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
+    
     const { error: saveError, data: saveData } = await supabase
       .from('subtitles_th')
       .update({
         thai: validated.thai,
       })
-      .eq('id', subtitleId)
-      .select();
+      .eq('id', exactSubtitleId) // Use exact ID from database
+      .select()
+      .single();
     
     if (saveError) {
-      console.error(`[Editor] ✗ Failed to save subtitle Thai text:`, saveError);
-      throw new Error(`Failed to save subtitle Thai text: ${saveError.message}`);
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleThaiText',message:'Failed to save subtitle Thai text',data:{subtitleId,error:saveError.message,code:saveError.code,details:saveError.details,hint:saveError.hint},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
+      throw new Error(`Failed to save subtitle Thai text: ${saveError.message} (code: ${saveError.code})`);
     }
     
     // Verify save succeeded
-    if (!saveData || saveData.length === 0) {
+    if (!saveData) {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleThaiText',message:'No data returned from update',data:{subtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
       throw new Error(`Failed to save subtitle Thai text: No data returned from update`);
     }
     
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleThaiText',message:'Update successful',data:{subtitleId,id:saveData.id,thaiPreview:saveData.thai?.substring(0,50),thaiFullLength:saveData.thai?.length,thaiMatchesInput:saveData.thai === validated.thai},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
+    
     // Validate verified subtitle from DB response
-    verifiedSubtitle = subtitleThSchema.parse(saveData[0]);
+    verifiedSubtitle = subtitleThSchema.parse(saveData);
   } catch (error) {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleThaiText',message:'Exception during save',data:{subtitleId,error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
     throw error; // Re-throw - if DB save fails, cache should NOT be updated
   }
   
-  // Update cache
-  const currentCache = getSubtitleCache();
-  const cacheIndex = currentCache.findIndex(sub => sub.id === subtitleId);
-  if (cacheIndex !== -1) {
-    const updatedCache = [...currentCache];
-    updatedCache[cacheIndex] = verifiedSubtitle;
-    setSubtitleCache(updatedCache);
+  const mediaId = getMediaIdFromSubtitleId(subtitleId);
+  if (mediaId) {
+    updateSubtitlesCache(mediaId, (current) => {
+      const idx = current.findIndex((sub) => sub.id === subtitleId);
+      if (idx === -1) return current;
+      const updated = [...current];
+      updated[idx] = verifiedSubtitle;
+      return updated;
+    });
+  }
+
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleThaiText',message:'Successfully updated subtitle Thai text',data:{subtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+  // #endregion
+  
+  return verifiedSubtitle;
+}
+
+/**
+ * Update subtitle timing (start_sec_th and/or end_sec_th)
+ * 
+ * @param subtitleId - ID of subtitle to update
+ * @param startSecTh - New start time (optional)
+ * @param endSecTh - New end time (optional)
+ * @returns Updated subtitle (verified from DB)
+ */
+export async function updateSubtitleTiming(
+  subtitleId: string,
+  startSecTh?: number,
+  endSecTh?: number
+): Promise<SubtitleTh> {
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleTiming',message:'Updating subtitle timing',data:{subtitleId,startSecTh,endSecTh},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+  // #endregion
+  
+  // Fetch current subtitle
+  const { data: subtitleData, error: fetchError } = await supabase
+    .from('subtitles_th')
+    .select('*')
+    .eq('id', subtitleId)
+    .single();
+  
+  if (fetchError) {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleTiming',message:'Failed to fetch subtitle',data:{subtitleId,error:fetchError.message,code:fetchError.code},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
+    throw new Error(`Failed to fetch subtitle: ${fetchError.message}`);
   }
   
-  console.log(`[Editor] ✓ Successfully updated subtitle ${subtitleId} Thai text`);
+  if (!subtitleData) {
+    throw new Error(`Subtitle ${subtitleId} not found`);
+  }
+  
+  // Validate subtitle
+  const subtitle = subtitleThSchema.parse(subtitleData);
+  
+  // CRITICAL: Use the exact ID from the fetched subtitle to ensure format matches (mediaId_index, not mediaId-index)
+  const exactSubtitleId = subtitle.id;
+  
+  // Validate timing values
+  if (startSecTh !== undefined && (isNaN(startSecTh) || startSecTh < 0)) {
+    throw new Error('start_sec_th must be a non-negative number');
+  }
+  if (endSecTh !== undefined && (isNaN(endSecTh) || endSecTh < 0)) {
+    throw new Error('end_sec_th must be a non-negative number');
+  }
+  if (startSecTh !== undefined && endSecTh !== undefined && endSecTh < startSecTh) {
+    throw new Error('end_sec_th must be >= start_sec_th');
+  }
+  
+  // Create updated subtitle
+  const updatedSubtitle = {
+    ...subtitle,
+    ...(startSecTh !== undefined && { start_sec_th: startSecTh }),
+    ...(endSecTh !== undefined && { end_sec_th: endSecTh }),
+  };
+  
+  // Validate updated subtitle
+  const validated = subtitleThSchema.parse(updatedSubtitle);
+  
+  // Prepare update data
+  const updateData: any = {};
+  if (startSecTh !== undefined) {
+    updateData.start_sec_th = validated.start_sec_th;
+  }
+  if (endSecTh !== undefined) {
+    updateData.end_sec_th = validated.end_sec_th;
+  }
+  
+  // Save to database
+  let verifiedSubtitle: SubtitleTh;
+  try {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleTiming',message:'Attempting to update subtitle timing',data:{subtitleId,exactSubtitleId,updateData,idMatches:subtitleId === exactSubtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
+    
+    const { error: saveError, data: saveData } = await supabase
+      .from('subtitles_th')
+      .update(updateData)
+      .eq('id', exactSubtitleId) // Use exact ID from fetched subtitle to ensure format matches
+      .select()
+      .single();
+    
+    if (saveError) {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleTiming',message:'Failed to save subtitle timing',data:{subtitleId,error:saveError.message,code:saveError.code,details:saveError.details,hint:saveError.hint},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
+      throw new Error(`Failed to save subtitle timing: ${saveError.message} (code: ${saveError.code})`);
+    }
+    
+    // Verify save succeeded
+    if (!saveData) {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleTiming',message:'No data returned from update',data:{subtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
+      throw new Error(`Failed to save subtitle timing: No data returned from update`);
+    }
+    
+    // Validate verified subtitle from DB response
+    verifiedSubtitle = subtitleThSchema.parse(saveData);
+  } catch (error) {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleTiming',message:'Exception during timing save',data:{subtitleId,error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
+    throw error; // Re-throw - if DB save fails, cache should NOT be updated
+  }
+  
+  const mediaId = getMediaIdFromSubtitleId(exactSubtitleId);
+  if (mediaId) {
+    updateSubtitlesCache(mediaId, (current) => {
+      const idx = current.findIndex((sub) => sub.id === exactSubtitleId);
+      if (idx === -1) return current;
+      const updated = [...current];
+      updated[idx] = verifiedSubtitle;
+      return updated;
+    });
+  }
+
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateSubtitleTiming',message:'Successfully updated subtitle timing',data:{subtitleId,exactSubtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+  // #endregion
   
   return verifiedSubtitle;
 }
@@ -108,7 +273,9 @@ export async function updateTokenText(
   tokenIndex: number,
   newTokenText: string
 ): Promise<SubtitleTh> {
-  console.log(`[Editor] Updating subtitle ${subtitleId}, token index ${tokenIndex}`);
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateTokenText',message:'Updating token text',data:{subtitleId,tokenIndex,newTokenText},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+  // #endregion
   
   if (!newTokenText.trim()) {
     throw new Error('Token text cannot be empty');
@@ -122,7 +289,9 @@ export async function updateTokenText(
     .single();
   
   if (fetchError) {
-    console.error(`[Editor] Failed to fetch subtitle:`, fetchError);
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateTokenText',message:'Failed to fetch subtitle',data:{subtitleId,error:fetchError.message,code:fetchError.code},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
     throw new Error(`Failed to fetch subtitle: ${fetchError.message}`);
   }
   
@@ -132,6 +301,9 @@ export async function updateTokenText(
   
   // Validate subtitle
   const subtitle = subtitleThSchema.parse(subtitleData);
+  
+  // CRITICAL: Use the exact ID from the fetched subtitle to ensure format matches (mediaId_index, not mediaId-index)
+  const exactSubtitleId = subtitle.id;
   
   // Ensure tokens_th exists and has tokens
   if (!subtitle.tokens_th || !subtitle.tokens_th.tokens) {
@@ -202,6 +374,10 @@ export async function updateTokenText(
   // Save to database
   let verifiedSubtitle: SubtitleTh;
   try {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateTokenText',message:'Attempting to update token text',data:{subtitleId,exactSubtitleId,tokenIndex,tokenCount:serializableTokens.length,idMatches:subtitleId === exactSubtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
+    
     const { error: saveError, data: saveData } = await supabase
       .from('subtitles_th')
       .update({
@@ -209,35 +385,48 @@ export async function updateTokenText(
           tokens: serializableTokens,
         },
       })
-      .eq('id', subtitleId)
-      .select();
+      .eq('id', exactSubtitleId) // Use exact ID from fetched subtitle to ensure format matches
+      .select()
+      .single();
     
     if (saveError) {
-      console.error(`[Editor] ✗ Failed to save token text:`, saveError);
-      throw new Error(`Failed to save token text: ${saveError.message}`);
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateTokenText',message:'Failed to save token text',data:{subtitleId,error:saveError.message,code:saveError.code,details:saveError.details,hint:saveError.hint},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
+      throw new Error(`Failed to save token text: ${saveError.message} (code: ${saveError.code})`);
     }
     
     // Verify save succeeded
-    if (!saveData || saveData.length === 0) {
+    if (!saveData) {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateTokenText',message:'No data returned from update',data:{subtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
       throw new Error(`Failed to save token text: No data returned from update`);
     }
     
     // Validate verified subtitle from DB response
-    verifiedSubtitle = subtitleThSchema.parse(saveData[0]);
+    verifiedSubtitle = subtitleThSchema.parse(saveData);
   } catch (error) {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateTokenText',message:'Exception during token text save',data:{subtitleId,error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
     throw error; // Re-throw - if DB save fails, cache should NOT be updated
   }
   
-  // Update cache
-  const currentCache = getSubtitleCache();
-  const cacheIndex = currentCache.findIndex(sub => sub.id === subtitleId);
-  if (cacheIndex !== -1) {
-    const updatedCache = [...currentCache];
-    updatedCache[cacheIndex] = verifiedSubtitle;
-    setSubtitleCache(updatedCache);
+  const mediaId = getMediaIdFromSubtitleId(exactSubtitleId);
+  if (mediaId) {
+    updateSubtitlesCache(mediaId, (current) => {
+      const idx = current.findIndex((sub) => sub.id === exactSubtitleId);
+      if (idx === -1) return current;
+      const updated = [...current];
+      updated[idx] = verifiedSubtitle;
+      return updated;
+    });
   }
-  
-  console.log(`[Editor] ✓ Successfully updated subtitle ${subtitleId}, token index ${tokenIndex}`);
+
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateTokenText',message:'Successfully updated token text',data:{subtitleId,exactSubtitleId,tokenIndex},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+  // #endregion
   
   return verifiedSubtitle;
 }
@@ -265,7 +454,9 @@ export async function updateTokensArray(
   subtitleId: string,
   tokensString: string
 ): Promise<SubtitleTh> {
-  console.log(`[Editor] Updating subtitle ${subtitleId} tokens array`);
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateTokensArray',message:'Updating tokens array',data:{subtitleId,tokensStringLength:tokensString.length},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+  // #endregion
   
   // Fetch current subtitle
   const { data: subtitleData, error: fetchError } = await supabase
@@ -275,7 +466,9 @@ export async function updateTokensArray(
     .single();
   
   if (fetchError) {
-    console.error(`[Editor] Failed to fetch subtitle:`, fetchError);
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateTokensArray',message:'Failed to fetch subtitle',data:{subtitleId,error:fetchError.message,code:fetchError.code},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
     throw new Error(`Failed to fetch subtitle: ${fetchError.message}`);
   }
   
@@ -285,6 +478,9 @@ export async function updateTokensArray(
   
   // Validate subtitle
   const subtitle = subtitleThSchema.parse(subtitleData);
+  
+  // CRITICAL: Use the exact ID from the fetched subtitle to ensure format matches (mediaId_index, not mediaId-index)
+  const exactSubtitleId = subtitle.id;
   
   // Ensure tokens_th exists
   if (!subtitle.tokens_th || !subtitle.tokens_th.tokens) {
@@ -370,6 +566,10 @@ export async function updateTokensArray(
   // Save to database
   let verifiedSubtitle: SubtitleTh;
   try {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateTokensArray',message:'Attempting to update tokens array',data:{subtitleId,exactSubtitleId,tokenCount:serializableTokens.length,idMatches:subtitleId === exactSubtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
+    
     const { error: saveError, data: saveData } = await supabase
       .from('subtitles_th')
       .update({
@@ -377,35 +577,48 @@ export async function updateTokensArray(
           tokens: serializableTokens,
         },
       })
-      .eq('id', subtitleId)
-      .select();
+      .eq('id', exactSubtitleId) // Use exact ID from fetched subtitle to ensure format matches
+      .select()
+      .single();
     
     if (saveError) {
-      console.error(`[Editor] ✗ Failed to save tokens array:`, saveError);
-      throw new Error(`Failed to save tokens array: ${saveError.message}`);
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateTokensArray',message:'Failed to save tokens array',data:{subtitleId,error:saveError.message,code:saveError.code,details:saveError.details,hint:saveError.hint},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
+      throw new Error(`Failed to save tokens array: ${saveError.message} (code: ${saveError.code})`);
     }
     
     // Verify save succeeded
-    if (!saveData || saveData.length === 0) {
+    if (!saveData) {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateTokensArray',message:'No data returned from update',data:{subtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
       throw new Error(`Failed to save tokens array: No data returned from update`);
     }
     
     // Validate verified subtitle from DB response
-    verifiedSubtitle = subtitleThSchema.parse(saveData[0]);
+    verifiedSubtitle = subtitleThSchema.parse(saveData);
   } catch (error) {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateTokensArray',message:'Exception during tokens array save',data:{subtitleId,error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
     throw error; // Re-throw - if DB save fails, cache should NOT be updated
   }
   
-  // Update cache
-  const currentCache = getSubtitleCache();
-  const cacheIndex = currentCache.findIndex(sub => sub.id === subtitleId);
-  if (cacheIndex !== -1) {
-    const updatedCache = [...currentCache];
-    updatedCache[cacheIndex] = verifiedSubtitle;
-    setSubtitleCache(updatedCache);
+  const mediaId = getMediaIdFromSubtitleId(exactSubtitleId);
+  if (mediaId) {
+    updateSubtitlesCache(mediaId, (current) => {
+      const idx = current.findIndex((sub) => sub.id === exactSubtitleId);
+      if (idx === -1) return current;
+      const updated = [...current];
+      updated[idx] = verifiedSubtitle;
+      return updated;
+    });
   }
-  
-  console.log(`[Editor] ✓ Successfully updated subtitle ${subtitleId} tokens array`);
+
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:updateTokensArray',message:'Successfully updated tokens array',data:{subtitleId,exactSubtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+  // #endregion
   
   return verifiedSubtitle;
 }
@@ -423,7 +636,9 @@ export async function splitToken(
   tokenIndex: number,
   splitPosition: number
 ): Promise<SubtitleTh> {
-  console.log(`[Editor] Splitting subtitle ${subtitleId}, token index ${tokenIndex} at position ${splitPosition}`);
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:splitToken',message:'Splitting token',data:{subtitleId,tokenIndex,splitPosition},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+  // #endregion
   
   // Fetch current subtitle
   const { data: subtitleData, error: fetchError } = await supabase
@@ -433,7 +648,9 @@ export async function splitToken(
     .single();
   
   if (fetchError) {
-    console.error(`[Editor] Failed to fetch subtitle:`, fetchError);
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:splitToken',message:'Failed to fetch subtitle',data:{subtitleId,error:fetchError.message,code:fetchError.code},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
     throw new Error(`Failed to fetch subtitle: ${fetchError.message}`);
   }
   
@@ -443,6 +660,9 @@ export async function splitToken(
   
   // Validate subtitle
   const subtitle = subtitleThSchema.parse(subtitleData);
+  
+  // CRITICAL: Use the exact ID from the fetched subtitle to ensure format matches (mediaId_index, not mediaId-index)
+  const exactSubtitleId = subtitle.id;
   
   // Ensure tokens_th exists and has tokens
   if (!subtitle.tokens_th || !subtitle.tokens_th.tokens) {
@@ -533,6 +753,10 @@ export async function splitToken(
   // Save to database
   let verifiedSubtitle: SubtitleTh;
   try {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:splitToken',message:'Attempting to save split token',data:{subtitleId,exactSubtitleId,tokenCount:serializableTokens.length,idMatches:subtitleId === exactSubtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
+    
     const { error: saveError, data: saveData } = await supabase
       .from('subtitles_th')
       .update({
@@ -540,35 +764,48 @@ export async function splitToken(
           tokens: serializableTokens,
         },
       })
-      .eq('id', subtitleId)
-      .select();
+      .eq('id', exactSubtitleId) // Use exact ID from fetched subtitle to ensure format matches
+      .select()
+      .single();
     
     if (saveError) {
-      console.error(`[Editor] ✗ Failed to save split token:`, saveError);
-      throw new Error(`Failed to save split token: ${saveError.message}`);
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:splitToken',message:'Failed to save split token',data:{subtitleId,error:saveError.message,code:saveError.code,details:saveError.details,hint:saveError.hint},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
+      throw new Error(`Failed to save split token: ${saveError.message} (code: ${saveError.code})`);
     }
     
     // Verify save succeeded
-    if (!saveData || saveData.length === 0) {
+    if (!saveData) {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:splitToken',message:'No data returned from update',data:{subtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
       throw new Error(`Failed to save split token: No data returned from update`);
     }
     
     // Validate verified subtitle from DB response
-    verifiedSubtitle = subtitleThSchema.parse(saveData[0]);
+    verifiedSubtitle = subtitleThSchema.parse(saveData);
   } catch (error) {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:splitToken',message:'Exception during split token save',data:{subtitleId,error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
     throw error; // Re-throw - if DB save fails, cache should NOT be updated
   }
   
-  // Update cache
-  const currentCache = getSubtitleCache();
-  const cacheIndex = currentCache.findIndex(sub => sub.id === subtitleId);
-  if (cacheIndex !== -1) {
-    const updatedCache = [...currentCache];
-    updatedCache[cacheIndex] = verifiedSubtitle;
-    setSubtitleCache(updatedCache);
+  const mediaId = getMediaIdFromSubtitleId(exactSubtitleId);
+  if (mediaId) {
+    updateSubtitlesCache(mediaId, (current) => {
+      const idx = current.findIndex((sub) => sub.id === exactSubtitleId);
+      if (idx === -1) return current;
+      const updated = [...current];
+      updated[idx] = verifiedSubtitle;
+      return updated;
+    });
   }
-  
-  console.log(`[Editor] ✓ Successfully split subtitle ${subtitleId}, token index ${tokenIndex}`);
+
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:splitToken',message:'Successfully split token',data:{subtitleId,exactSubtitleId,tokenIndex},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+  // #endregion
   
   return verifiedSubtitle;
 }
@@ -590,7 +827,9 @@ export async function conjoinTokens(
   startTokenIndex: number,
   endTokenIndex: number
 ): Promise<SubtitleTh> {
-  console.log(`[Editor] Conjoining subtitle ${subtitleId}, tokens ${startTokenIndex} to ${endTokenIndex}`);
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:conjoinTokens',message:'Conjoining tokens',data:{subtitleId,startTokenIndex,endTokenIndex},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+  // #endregion
   
   // Validate range
   if (startTokenIndex > endTokenIndex) {
@@ -605,7 +844,9 @@ export async function conjoinTokens(
     .single();
   
   if (fetchError) {
-    console.error(`[Editor] Failed to fetch subtitle:`, fetchError);
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:conjoinTokens',message:'Failed to fetch subtitle',data:{subtitleId,error:fetchError.message,code:fetchError.code},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
     throw new Error(`Failed to fetch subtitle: ${fetchError.message}`);
   }
   
@@ -615,6 +856,9 @@ export async function conjoinTokens(
   
   // Validate subtitle
   const subtitle = subtitleThSchema.parse(subtitleData);
+  
+  // CRITICAL: Use the exact ID from the fetched subtitle to ensure format matches (mediaId_index, not mediaId-index)
+  const exactSubtitleId = subtitle.id;
   
   // Ensure tokens_th exists and has tokens
   if (!subtitle.tokens_th || !subtitle.tokens_th.tokens) {
@@ -713,6 +957,10 @@ export async function conjoinTokens(
   // Save to database
   let verifiedSubtitle: SubtitleTh;
   try {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:conjoinTokens',message:'Attempting to save conjoined tokens',data:{subtitleId,exactSubtitleId,tokenCount:serializableTokens.length,idMatches:subtitleId === exactSubtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
+    
     const { error: saveError, data: saveData } = await supabase
       .from('subtitles_th')
       .update({
@@ -720,35 +968,48 @@ export async function conjoinTokens(
           tokens: serializableTokens,
         },
       })
-      .eq('id', subtitleId)
-      .select();
+      .eq('id', exactSubtitleId) // Use exact ID from fetched subtitle to ensure format matches
+      .select()
+      .single();
     
     if (saveError) {
-      console.error(`[Editor] ✗ Failed to save conjoined tokens:`, saveError);
-      throw new Error(`Failed to save conjoined tokens: ${saveError.message}`);
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:conjoinTokens',message:'Failed to save conjoined tokens',data:{subtitleId,error:saveError.message,code:saveError.code,details:saveError.details,hint:saveError.hint},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
+      throw new Error(`Failed to save conjoined tokens: ${saveError.message} (code: ${saveError.code})`);
     }
     
     // Verify save succeeded
-    if (!saveData || saveData.length === 0) {
+    if (!saveData) {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:conjoinTokens',message:'No data returned from update',data:{subtitleId},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
       throw new Error(`Failed to save conjoined tokens: No data returned from update`);
     }
     
     // Validate verified subtitle from DB response
-    verifiedSubtitle = subtitleThSchema.parse(saveData[0]);
+    verifiedSubtitle = subtitleThSchema.parse(saveData);
   } catch (error) {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:conjoinTokens',message:'Exception during conjoined tokens save',data:{subtitleId,error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+    // #endregion
     throw error; // Re-throw - if DB save fails, cache should NOT be updated
   }
   
-  // Update cache
-  const currentCache = getSubtitleCache();
-  const cacheIndex = currentCache.findIndex(sub => sub.id === subtitleId);
-  if (cacheIndex !== -1) {
-    const updatedCache = [...currentCache];
-    updatedCache[cacheIndex] = verifiedSubtitle;
-    setSubtitleCache(updatedCache);
+  const mediaId = getMediaIdFromSubtitleId(exactSubtitleId);
+  if (mediaId) {
+    updateSubtitlesCache(mediaId, (current) => {
+      const idx = current.findIndex((sub) => sub.id === exactSubtitleId);
+      if (idx === -1) return current;
+      const updated = [...current];
+      updated[idx] = verifiedSubtitle;
+      return updated;
+    });
   }
-  
-  console.log(`[Editor] ✓ Successfully conjoined subtitle ${subtitleId}, tokens ${startTokenIndex} to ${endTokenIndex}`);
+
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'subtitleEditor.ts:conjoinTokens',message:'Successfully conjoined tokens',data:{subtitleId,exactSubtitleId,startTokenIndex,endTokenIndex},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+  // #endregion
   
   return verifiedSubtitle;
 }

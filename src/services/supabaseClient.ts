@@ -56,13 +56,28 @@ export async function saveEpisode(episode: Episode): Promise<void> {
     episode_title: validated.episode_title || null,
   };
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('episodes')
-    .upsert(episodeData, { onConflict: 'id' });
+    .upsert(episodeData, { onConflict: 'id' })
+    .select();
 
   if (error) {
     throw new Error(`Failed to save episode: ${error.message}`);
   }
+}
+
+/**
+ * Fetch an episode by media_id only
+ */
+export async function fetchEpisodeByMediaId(mediaId: string): Promise<Episode | null> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from('episodes')
+    .select('*')
+    .eq('media_id', mediaId)
+    .maybeSingle();
+  if (error) throw error;
+  return data ? episodeSchema.parse(data) : null;
 }
 
 /**

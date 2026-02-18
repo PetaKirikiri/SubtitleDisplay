@@ -68,10 +68,14 @@ export function cleanupMeaningHotkeys(): void {
  * Handle number key press for meaning selection (0-9)
  */
 async function handleNumberKeyPress(e: KeyboardEvent): Promise<void> {
+  // Don't handle keys when user is typing in TokenArea (e.g. login form, meaning inputs)
+  const target = e.target instanceof Element ? e.target : null;
+  if (target?.closest('[data-token-area]')) return;
+
   // #region agent log
   fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenarea/helpers/hotkeys-meaning.ts:handleNumberKeyPress',message:'Function entry',data:{key:e.key,keyCode:e.keyCode,hasStateAccessors:!!stateAccessors,isEnabled},timestamp:Date.now(),runId:'run1',hypothesisId:'C'})}).catch(()=>{});
   // #endregion
-  
+
   if (!stateAccessors) {
     // #region agent log
     fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tokenarea/helpers/hotkeys-meaning.ts:handleNumberKeyPress',message:'Early return - no state accessors',data:{key:e.key},timestamp:Date.now(),runId:'run1',hypothesisId:'B'})}).catch(()=>{});

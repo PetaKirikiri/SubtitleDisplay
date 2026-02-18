@@ -1,7 +1,7 @@
 /**
  * Netflix Metadata Extractor
- * Extracts episode metadata from Netflix DOM and URL
- * Returns Episode with Zod schema field names directly
+ * Gets show_title, episode_number, episode_title from Netflix DOM.
+ * Matches SmartSubs exactly: content script, document.querySelector, no injection.
  */
 
 import { episodeSchema, type Episode } from '@/schemas/episodeSchema';
@@ -37,108 +37,88 @@ function generateEpisodeId(media_id: string): bigint {
 }
 
 /**
- * Extract episode from Netflix DOM
- * Returns Episode with Zod schema field names directly
- * Simple approach: get what we can, default season to 1
+ * Extract raw strings from DOM - same as SmartSubs extract-metadata.js
+ * Content script context, plain document.querySelector
  */
-export function extractEpisodeFromNetflixPage(): Episode | null {
-  if (typeof document === 'undefined') {
-    return null;
-  }
+function fetchMetadataStringsFromPage(): { rawShowName: string; episodeText: string } {
+  const showNameElement = document.querySelector('[data-uia="video-title"]');
+  const episodeInfoElement = document.querySelector('[data-uia="video-title-secondary"]');
+  const rawShowName = showNameElement ? (showNameElement.textContent || '').trim() : '';
+  const episodeText = episodeInfoElement ? (episodeInfoElement.textContent || '').trim() : '';
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'netflixMetadataExtractor.ts:fetchMetadataStringsFromPage',message:'DOM query',data:{hasShowEl:!!showNameElement,hasEpisodeEl:!!episodeInfoElement,rawShowName:rawShowName.substring(0,80),episodeText:episodeText.substring(0,80)},timestamp:Date.now(),hypothesisId:'DOM'})}).catch(()=>{});
+  // #endregion
+  return { rawShowName, episodeText };
+}
 
-  const url = window.location.href;
-  const media_id = getMediaIdFromUrl(url);
-  if (!media_id) {
-    return null;
-  }
-
-  // Simple extraction - get what's available
+/**
+ * Parse raw strings into show_title, episode_number, episode_title (SmartSubs logic)
+ */
+function parseMetadataStrings(rawShowName: string, episodeText: string): {
+  show_title: string | undefined;
+  episode_number: number | undefined;
+  episode_title: string | undefined;
+} {
   let show_title: string | undefined;
   let episode_number: number | undefined;
   let episode_title: string | undefined;
-  const season_number = 1; // Default to 1 as we can't reliably get it
 
-  // Try multiple selectors for show title
-  let showNameElement = document.querySelector('[data-uia="video-title"]');
-  if (!showNameElement) {
-    // Try alternative selectors
-    showNameElement = document.querySelector('h1[class*="title"], h1[class*="Title"]') as HTMLElement;
-  }
-  if (!showNameElement) {
-    // Try finding title in common Netflix structures
-    showNameElement = document.querySelector('[class*="video-title"], [class*="VideoTitle"]') as HTMLElement;
-  }
-  
-  if (showNameElement) {
-    const rawTitle = showNameElement.textContent?.trim() || '';
-    
-    // Normalize empty strings to undefined for optional fields
-    if (rawTitle === '') {
-      show_title = undefined;
+  if (rawShowName) {
+    const episodePattern = /([Ee](\d+)|[Ee]pisode\s+(\d+))/;
+    const episodeMatch = rawShowName.match(episodePattern);
+    if (episodeMatch && episodeMatch.index !== undefined) {
+      show_title = rawShowName.substring(0, episodeMatch.index).trim() || undefined;
+      episode_number = parseInt(episodeMatch[2] || episodeMatch[3], 10);
+      episode_title = rawShowName.substring(episodeMatch.index + episodeMatch[0].length).trim() || undefined;
     } else {
-      // Parse pattern: "ShowTitleE1EpisodeTitle" or "ShowTitle Episode 1 EpisodeTitle"
-      const episodePattern = /([Ee](\d+)|[Ee]pisode\s+(\d+))/;
-      const episodeMatch = rawTitle.match(episodePattern);
-      
-      if (episodeMatch && episodeMatch.index !== undefined) {
-        // Extract show title (before episode marker)
-        const extractedShowTitle = rawTitle.substring(0, episodeMatch.index).trim();
-        show_title = extractedShowTitle || undefined; // Normalize empty string to undefined
-        
-        // Extract episode number
-        episode_number = parseInt(episodeMatch[2] || episodeMatch[3], 10);
-        
-        // Extract episode title (after episode marker)
-        const afterEpisode = rawTitle.substring(episodeMatch.index + episodeMatch[0].length).trim();
-        episode_title = afterEpisode || undefined; // Normalize empty string to undefined
-      } else {
-        // No episode pattern found, use whole thing as show title
-        show_title = rawTitle || undefined; // Normalize empty string to undefined
-      }
+      show_title = rawShowName || undefined;
     }
-  }
-  
-  // If still no show_title, try to get it from page title or use a default
-  if (!show_title) {
-    const pageTitle = document.title;
-    if (pageTitle && pageTitle !== 'Netflix') {
-      // Remove "Netflix" and "|" from title if present
-      show_title = pageTitle.replace(/^\s*Netflix\s*[-|]\s*/i, '').replace(/\s*[-|]\s*Netflix\s*$/i, '').trim() || undefined;
-    }
-  }
-
-  // Also check video-title-secondary for episode info if we didn't get it from title
-  if (!episode_number || !episode_title) {
-    const episodeInfoElement = document.querySelector('[data-uia="video-title-secondary"]');
-    if (episodeInfoElement) {
-      const episodeText = episodeInfoElement.textContent?.trim() || '';
-      
-      if (!episode_title && episodeText) {
-        episode_title = episodeText || undefined; // Normalize empty string to undefined
-      }
-      
-      if (!episode_number) {
-        const episodeMatch = episodeText.match(/[Ee]pisode\s+(\d+)|[Ee](\d+)/);
-        if (episodeMatch) {
-          episode_number = parseInt(episodeMatch[1] || episodeMatch[2], 10);
-        }
+    if (!episode_title && rawShowName) {
+      const combinedPattern = /([Ee](\d+)|[Ee]pisode\s+(\d+))(.+)?$/;
+      const combinedMatch = rawShowName.match(combinedPattern);
+      if (combinedMatch) {
+        if (!episode_number) episode_number = parseInt(combinedMatch[2] || combinedMatch[3], 10);
+        if (combinedMatch[4]) episode_title = combinedMatch[4].trim() || undefined;
       }
     }
   }
 
-  // Create Episode object with Zod field names, validate immediately
+  if (episodeText) {
+    if (!episode_title) episode_title = episodeText || undefined;
+    if (!episode_number) {
+      const m = episodeText.match(/[Ee]pisode\s+(\d+)|[Ee](\d+)/);
+      if (m) episode_number = parseInt(m[1] || m[2], 10);
+    }
+  }
+
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'netflixMetadataExtractor.ts:parseMetadataStrings',message:'Parsed result',data:{rawShowName,episodeText,show_title,episode_number,episode_title},timestamp:Date.now(),hypothesisId:'H4'})}).catch(()=>{});
+  // #endregion
+  return { show_title, episode_number, episode_title };
+}
+
+/**
+ * Extract episode from Netflix page - same flow as SmartSubs handleLoadSubtitles
+ */
+export function extractEpisodeFromNetflixPage(): Episode | null {
+  const url = typeof window !== 'undefined' ? window.location.href : '';
+  const media_id = getMediaIdFromUrl(url);
+  if (!media_id) return null;
+
+  const { rawShowName, episodeText } = fetchMetadataStringsFromPage();
+  const { show_title, episode_number, episode_title } = parseMetadataStrings(rawShowName, episodeText);
+
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'netflixMetadataExtractor.ts:extractEpisodeFromNetflixPage',message:'Final return',data:{media_id,show_title,episode_number,episode_title},timestamp:Date.now(),hypothesisId:'H5'})}).catch(()=>{});
+  // #endregion
   const episode = {
     id: generateEpisodeId(media_id),
     media_id,
     show_title,
     episode_number,
-    season_number,
+    season_number: 1,
     episode_title,
   };
 
-  // Validate shape and data quality
-  // Note: show_title is optional in schema, so we allow it to be missing
-  const validated = episodeSchema.parse(episode);
-
-  return validated;
+  return episodeSchema.parse(episode);
 }

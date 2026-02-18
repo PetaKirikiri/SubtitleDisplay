@@ -24,6 +24,7 @@ import { subtitleThSchema, type SubtitleTh } from '../schemas/subtitleThSchema';
 import { episodeSchema, type Episode } from '../schemas/episodeSchema';
 import { wordThSchema, type WordTh } from '../schemas/wordThSchema';
 import { meaningThSchema, type MeaningTh } from '../schemas/meaningThSchema';
+import { userWordsSchema, type UserWords } from '../schemas/userWordsSchema';
 
 // Re-export Drizzle schema for migrations and type inference
 export * from '../db/schema';
@@ -1152,4 +1153,99 @@ export async function deleteMeaning(meaningId: bigint): Promise<void> {
   }
   
   console.log(`[Delete] ✓ Successfully deleted meaning with ID ${meaningId.toString()}`);
+}
+
+/**
+ * Fetch user_words for a user by user_id
+ *
+ * Validates against: src/schemas/userWordsSchema.ts
+ */
+export async function fetchUserWords(userId: string): Promise<UserWords[]> {
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:fetchUserWords',message:'FETCH_USER_WORDS_ENTRY',data:{userId},timestamp:Date.now(),runId:'run1',hypothesisId:'CRUD'})}).catch(()=>{});
+  // #endregion
+  const validated = userWordsSchema.pick({ user_id: true }).parse({ user_id: userId });
+
+  const { data, error } = await supabase
+    .from('user_words')
+    .select('*')
+    .eq('user_id', validated.user_id);
+
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:fetchUserWords',message:'FETCH_RESPONSE',data:{rowCount:data?.length ?? 0,hasError:!!error,errorMessage:error?.message},timestamp:Date.now(),runId:'run1',hypothesisId:'CRUD'})}).catch(()=>{});
+  // #endregion
+  if (error) throw error;
+
+  const rows = (data || []).map((row) => {
+    const r = { ...row };
+    if (r.created_at === null) r.created_at = undefined;
+    else if (r.created_at instanceof Date) r.created_at = r.created_at.toISOString();
+    else if (typeof r.created_at === 'string') {
+      const parsed = new Date(r.created_at);
+      r.created_at = isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
+    }
+    return r;
+  });
+
+  return userWordsSchema.array().parse(rows);
+}
+
+/**
+ * Upsert a user_word row (insert or update by composite PK)
+ */
+export async function upsertUserWord(row: UserWords): Promise<UserWords> {
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:upsertUserWord',message:'SUPABASE_UPSERT_ENTRY',data:{row},timestamp:Date.now(),runId:'run1',hypothesisId:'H4'})}).catch(()=>{});
+  // #endregion
+  const validated = userWordsSchema.parse(row);
+
+  const payload: Record<string, unknown> = {
+    user_id: validated.user_id,
+    word_id: validated.word_id,
+    status: validated.status,
+  };
+  if (validated.created_at) payload.created_at = validated.created_at;
+
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:upsertUserWord',message:'BEFORE_SUPABASE_CALL',data:{payload,onConflict:'user_id,word_id'},timestamp:Date.now(),runId:'run1',hypothesisId:'H5'})}).catch(()=>{});
+  // #endregion
+  const { data, error } = await supabase
+    .from('user_words')
+    .upsert(payload, { onConflict: 'user_id,word_id' })
+    .select()
+    .single();
+
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:upsertUserWord',message:'SUPABASE_RESPONSE',data:{hasData:!!data,hasError:!!error,errorCode:error?.code,errorMessage:error?.message},timestamp:Date.now(),runId:'run1',hypothesisId:'H3'})}).catch(()=>{});
+  // #endregion
+  if (error) throw error;
+  const r = data as Record<string, unknown>;
+  if (r.created_at === null) r.created_at = undefined;
+  else if (r.created_at instanceof Date) r.created_at = (r.created_at as Date).toISOString();
+  else if (typeof r.created_at === 'string') {
+    const parsed = new Date(r.created_at);
+    r.created_at = isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
+  }
+  return userWordsSchema.parse(r);
+}
+
+/**
+ * Delete a user_word by composite primary key
+ */
+export async function deleteUserWord(userId: string, wordId: string): Promise<void> {
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:deleteUserWord',message:'DELETE_ENTRY',data:{userId,wordId},timestamp:Date.now(),runId:'run1',hypothesisId:'CRUD'})}).catch(()=>{});
+  // #endregion
+  userWordsSchema.pick({ user_id: true, word_id: true }).parse({ user_id: userId, word_id: wordId });
+
+  const { error } = await supabase
+    .from('user_words')
+    .delete()
+    .eq('user_id', userId)
+    .eq('word_id', wordId);
+
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'supabase/index.ts:deleteUserWord',message:'DELETE_RESPONSE',data:{hasError:!!error,errorMessage:error?.message},timestamp:Date.now(),runId:'run1',hypothesisId:'CRUD'})}).catch(()=>{});
+  // #endregion
+  if (error) throw error;
 }

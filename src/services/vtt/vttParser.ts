@@ -129,6 +129,6 @@ export async function parseVTTFile(
   if (subtitles.length === 0) {
     throw new Error('No valid subtitles parsed from VTT file');
   }
-  
+
   return subtitles;
 }

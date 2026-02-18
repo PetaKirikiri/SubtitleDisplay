@@ -8,7 +8,7 @@
 import React, { useState, useEffect } from 'react';
 import type { SubtitleTh, TokenObject } from '@/schemas/subtitleThSchema';
 import type { WordTh } from '@/schemas/wordThSchema';
-import { updateSubtitleThaiText, updateTokenText, updateTokensArray } from '../subarea/helpers/subtitleEditor';
+import { updateSubtitleThaiText, updateTokenText, updateTokensArray, updateSubtitleTiming } from '../subarea/helpers/subtitleEditor';
 import { fetchWord, saveWordOnly } from '../../supabase';
 
 export interface SubtitleEditorProps {
@@ -34,6 +34,12 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
   const [editedTokensString, setEditedTokensString] = useState('');
   const [isEditingTokensArray, setIsEditingTokensArray] = useState(false);
   const [isSavingTokensArray, setIsSavingTokensArray] = useState(false);
+  
+  // Timing editing state
+  const [editedStartSecTh, setEditedStartSecTh] = useState<string>('');
+  const [editedEndSecTh, setEditedEndSecTh] = useState<string>('');
+  const [isEditingTiming, setIsEditingTiming] = useState(false);
+  const [isSavingTiming, setIsSavingTiming] = useState(false);
   
   // Editing state for word information fields
   const [editingG2P, setEditingG2P] = useState(false);
@@ -67,21 +73,32 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
         const tokens = currentSubtitle.tokens_th?.tokens || [];
         const tokensString = tokens.map(t => typeof t === 'string' ? t : t.t).join(' ');
         setEditedTokensString(tokensString);
+        // Initialize timing fields
+        setEditedStartSecTh(currentSubtitle.start_sec_th?.toString() || '');
+        setEditedEndSecTh(currentSubtitle.end_sec_th?.toString() || '');
+        setIsEditingTiming(false);
       } else {
         // Same subtitle ID - refresh Thai text and tokens string (subtitle was updated)
-        setEditedThai(currentSubtitle.thai || '');
+        // ONLY update if NOT currently editing those fields
+        if (!isEditingThai) {
+          setEditedThai(currentSubtitle.thai || '');
+        }
         if (!isEditingTokensArray) {
           const tokens = currentSubtitle.tokens_th?.tokens || [];
           const tokensString = tokens.map(t => typeof t === 'string' ? t : t.t).join(' ');
           setEditedTokensString(tokensString);
         }
+        if (!isEditingTiming) {
+          setEditedStartSecTh(currentSubtitle.start_sec_th?.toString() || '');
+          setEditedEndSecTh(currentSubtitle.end_sec_th?.toString() || '');
+        }
       }
     }
-  }, [currentSubtitle?.id]);
+  }, [currentSubtitle?.id, isEditingThai, isEditingTokensArray, isEditingTiming]);
   
   // Refresh tokens display when tokens array changes (for token buttons and string display)
   // This ensures individual token buttons update when tokens array changes via space-separated editor
-  // Use JSON.stringify to detect actual content changes, not just reference changes
+  // CRITICAL: Only update when subtitle ID changes or when NOT editing - never during keystrokes
   const tokensStringRef = React.useRef<string>('');
   useEffect(() => {
     if (currentSubtitle && !isEditingTokensArray) {
@@ -93,22 +110,26 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
         setEditedTokensString(tokensString);
       }
     }
-  }, [currentSubtitle, isEditingTokensArray]);
+  }, [currentSubtitle?.id, isEditingTokensArray]); // Only depend on ID, not the whole object
   
   // Refresh word data when subtitle updates (same ID) and we're editing a token
   // This ensures we have latest word data after subtitle is updated via onSubtitleUpdate
+  // CRITICAL: Only run when currentSubtitle ID changes, NOT on every keystroke
   const prevSubtitleForRefreshRef = React.useRef<SubtitleTh | null>(null);
   useEffect(() => {
     if (currentSubtitle && editingTokenIndex !== null && editedTokenText) {
-      const subtitleWasUpdated = prevSubtitleForRefreshRef.current?.id === currentSubtitle.id;
+      const subtitleIdChanged = prevSubtitleForRefreshRef.current?.id !== currentSubtitle.id;
+      const subtitleWasUpdated = !subtitleIdChanged && prevSubtitleForRefreshRef.current !== null;
       
       if (subtitleWasUpdated) {
-        // Subtitle was updated (same ID) - refresh word data
+        // Subtitle was updated (same ID) - refresh word data ONLY after save
         setIsLoadingWordData(true);
         fetchWord(editedTokenText).then(wordData => {
           setTokenWordData(wordData);
         }).catch(error => {
-          console.error('Failed to refresh word data:', error);
+          // #region agent log
+          fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SubtitleEditor.tsx:useEffect',message:'Failed to refresh word data',data:{tokenText:editedTokenText,error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+          // #endregion
           setTokenWordData(null);
         }).finally(() => {
           setIsLoadingWordData(false);
@@ -117,7 +138,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
       
       prevSubtitleForRefreshRef.current = currentSubtitle;
     }
-  }, [currentSubtitle, editingTokenIndex, editedTokenText]);
+  }, [currentSubtitle?.id, editingTokenIndex]); // Removed editedTokenText - only update on subtitle ID change or token selection change
   
   // Initialize edited word data when tokenWordData changes
   useEffect(() => {
@@ -159,7 +180,9 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
       setIsEditingThai(false);
       onSubtitleUpdate?.(updatedSubtitle);
     } catch (error) {
-      console.error('Failed to update subtitle Thai text:', error);
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SubtitleEditor.tsx:handleThaiSave',message:'Failed to update subtitle Thai text',data:{subtitleId:currentSubtitle.id,error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
       alert(`Failed to update subtitle: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsSavingThai(false);
@@ -190,7 +213,9 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
       const wordData = await fetchWord(tokenText);
       setTokenWordData(wordData);
     } catch (error) {
-      console.error('Failed to fetch word data:', error);
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SubtitleEditor.tsx:handleTokenClick',message:'Failed to fetch word data',data:{tokenText,error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
       // Don't show error to user - word might not exist in words_th table
     } finally {
       setIsLoadingWordData(false);
@@ -230,7 +255,9 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
           const wordData = await fetchWord(editedTokenText.trim());
           setTokenWordData(wordData);
         } catch (error) {
-          console.error('Failed to fetch word data for new token:', error);
+          // #region agent log
+          fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SubtitleEditor.tsx:handleTokenSave',message:'Failed to fetch word data for new token',data:{tokenText:editedTokenText.trim(),error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+          // #endregion
           // Word might not exist - that's okay
         } finally {
           setIsLoadingWordData(false);
@@ -241,7 +268,9 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
       setEditedTokenText('');
       onSubtitleUpdate?.(updatedSubtitle);
     } catch (error) {
-      console.error('Failed to update token text:', error);
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SubtitleEditor.tsx:handleTokenSave',message:'Failed to update token text',data:{subtitleId:currentSubtitle.id,tokenIndex:editingTokenIndex,error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
       alert(`Failed to update token: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsSavingToken(false);
@@ -276,7 +305,9 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
       setEditingG2P(false);
       setEditingPhonetic(false);
     } catch (error) {
-      console.error('Failed to save word data:', error);
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SubtitleEditor.tsx:handleSaveWordData',message:'Failed to save word data',data:{wordTh:editedTokenText,error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
       alert(`Failed to save word data: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsSavingWordData(false);
@@ -318,7 +349,9 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
       // Notify parent to update currentSubtitle prop
       onSubtitleUpdate?.(updatedSubtitle);
     } catch (error) {
-      console.error('Failed to update tokens array:', error);
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SubtitleEditor.tsx:handleTokensArraySave',message:'Failed to update tokens array',data:{subtitleId:currentSubtitle.id,error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
       alert(`Failed to update tokens array: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsSavingTokensArray(false);
@@ -332,10 +365,140 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
     setIsEditingTokensArray(false);
   };
   
+  const handleTimingEdit = () => {
+    // Defocus any other editing
+    setIsEditingThai(false);
+    setEditingTokenIndex(null);
+    setEditedTokenText('');
+    setTokenWordData(null);
+    setIsEditingTokensArray(false);
+    setIsEditingTiming(true);
+  };
+  
+  const handleTimingSave = async () => {
+    const startSecTh = editedStartSecTh.trim() ? parseFloat(editedStartSecTh.trim()) : undefined;
+    const endSecTh = editedEndSecTh.trim() ? parseFloat(editedEndSecTh.trim()) : undefined;
+    
+    if (startSecTh !== undefined && (isNaN(startSecTh) || startSecTh < 0)) {
+      alert('Start time must be a non-negative number');
+      return;
+    }
+    if (endSecTh !== undefined && (isNaN(endSecTh) || endSecTh < 0)) {
+      alert('End time must be a non-negative number');
+      return;
+    }
+    if (startSecTh !== undefined && endSecTh !== undefined && endSecTh < startSecTh) {
+      alert('End time must be >= start time');
+      return;
+    }
+    
+    setIsSavingTiming(true);
+    try {
+      const updatedSubtitle = await updateSubtitleTiming(
+        currentSubtitle.id,
+        startSecTh,
+        endSecTh
+      );
+      setIsEditingTiming(false);
+      onSubtitleUpdate?.(updatedSubtitle);
+    } catch (error) {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SubtitleEditor.tsx:handleTimingSave',message:'Failed to update subtitle timing',data:{subtitleId:currentSubtitle.id,startSecTh,endSecTh,error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+      // #endregion
+      alert(`Failed to update timing: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsSavingTiming(false);
+    }
+  };
+  
+  const handleTimingCancel = () => {
+    setEditedStartSecTh(currentSubtitle.start_sec_th?.toString() || '');
+    setEditedEndSecTh(currentSubtitle.end_sec_th?.toString() || '');
+    setIsEditingTiming(false);
+  };
+  
   return (
     <div className="p-6 space-y-8">
       <div className="text-white font-bold mb-4" style={{ fontSize: '56px' }}>
         Edit Subtitle
+      </div>
+      
+      {/* Timing fields */}
+      <div>
+        <div className="block text-white/70 mb-3" style={{ fontSize: '48px' }}>Timing</div>
+        {isEditingTiming ? (
+          <div className="space-y-3 bg-[#e50914]/10 border-2 border-[#e50914] rounded-lg p-4 shadow-lg shadow-[#e50914]/30">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <div className="block text-white/70 mb-2" style={{ fontSize: '40px' }}>Start Time (seconds)</div>
+                <input
+                  type="number"
+                  step="0.001"
+                  value={editedStartSecTh}
+                  onChange={(e) => setEditedStartSecTh(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      handleTimingCancel();
+                    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                      e.preventDefault();
+                      handleTimingSave();
+                    }
+                  }}
+                  className="w-full bg-white/10 border-2 border-[#e50914] rounded p-3 text-white focus:outline-none focus:border-[#e50914] focus:ring-2 focus:ring-[#e50914]/50"
+                  placeholder="0.000"
+                  autoFocus
+                  style={{ fontSize: '48px', pointerEvents: 'auto' }}
+                />
+              </div>
+              <div>
+                <div className="block text-white/70 mb-2" style={{ fontSize: '40px' }}>End Time (seconds)</div>
+                <input
+                  type="number"
+                  step="0.001"
+                  value={editedEndSecTh}
+                  onChange={(e) => setEditedEndSecTh(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      handleTimingCancel();
+                    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                      e.preventDefault();
+                      handleTimingSave();
+                    }
+                  }}
+                  className="w-full bg-white/10 border-2 border-[#e50914] rounded p-3 text-white focus:outline-none focus:border-[#e50914] focus:ring-2 focus:ring-[#e50914]/50"
+                  placeholder="0.000"
+                  style={{ fontSize: '48px', pointerEvents: 'auto' }}
+                />
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={handleTimingSave}
+                disabled={isSavingTiming}
+                className="px-4 py-2 bg-[#e50914] text-white rounded hover:bg-[#e50914]/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                style={{ fontSize: '40px' }}
+              >
+                {isSavingTiming ? 'Saving...' : 'Save'}
+              </button>
+              <button
+                onClick={handleTimingCancel}
+                disabled={isSavingTiming}
+                className="px-4 py-2 bg-white/10 text-white rounded hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                style={{ fontSize: '40px' }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div
+            onClick={handleTimingEdit}
+            className="bg-white/10 border border-white/20 rounded p-4 text-white cursor-pointer hover:bg-white/20 hover:border-[#e50914] transition-all"
+            style={{ fontSize: '48px' }}
+          >
+            Start: {currentSubtitle.start_sec_th?.toFixed(3) || '(not set)'} | End: {currentSubtitle.end_sec_th?.toFixed(3) || '(not set)'}
+          </div>
+        )}
       </div>
       
       {/* Thai text input */}
@@ -673,7 +836,9 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
                     });
                     setTokenWordData(newWord);
                   } catch (error) {
-                    console.error('Failed to create word:', error);
+                    // #region agent log
+                    fetch('http://127.0.0.1:7244/ingest/329a6b2f-a75f-4055-8230-3e65a0e37f19',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SubtitleEditor.tsx:Create Word Entry',message:'Failed to create word',data:{wordTh:tokenText,error:error instanceof Error ? error.message : String(error)},timestamp:Date.now(),runId:'run1',hypothesisId:'DB_UPDATE'})}).catch(()=>{});
+                    // #endregion
                     alert(`Failed to create word: ${error instanceof Error ? error.message : String(error)}`);
                   } finally {
                     setIsLoadingWordData(false);
